@@ -25,10 +25,11 @@ from config.risk import (
     FLATTEN_TIME_ET,
     MAX_POSITION_CONTRACTS,
     MAX_TRADES_PER_DAY,
-    MES_POINT_VALUE,
+    MES_POINT_VALUE,  # alias for POINT_VALUE
     ROUND_TRIP_COST_USD,
     SLIPPAGE_POINTS_PER_SIDE,
 )
+from config.settings import POINT_VALUE
 from src.strategy.three_bar_reversal import Signal, scan_signals
 
 
@@ -130,7 +131,7 @@ def _simulate_trades(
         else:
             exit_price = opens[exit_idx]
 
-        gross_pnl = direction * (exit_price - entry_price) * MES_POINT_VALUE
+        gross_pnl = direction * (exit_price - entry_price) * POINT_VALUE
         cost = ROUND_TRIP_COST_USD * cost_multiplier
         net_pnl = gross_pnl - cost
 

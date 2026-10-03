@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from config.settings import CONTINUOUS_CSV, RAW_DIR
+from config.settings import CONTINUOUS_CSV, RAW_DIR, SYMBOL, YAHOO_TICKER
 
 try:
     import yfinance as yf
@@ -57,12 +57,12 @@ def download_yahoo(
 
     os.makedirs(RAW_DIR, exist_ok=True)
 
-    print(f"Downloading MES=F {interval} bars from Yahoo Finance ({start} → {end})...")
-    ticker = yf.Ticker("MES=F")
+    print(f"Downloading {YAHOO_TICKER} ({SYMBOL}) {interval} bars from Yahoo Finance ({start} → {end})...")
+    ticker = yf.Ticker(YAHOO_TICKER)
     df = ticker.history(start=str(start), end=str(end), interval=interval)
 
     if df.empty:
-        raise RuntimeError("Yahoo Finance returned no data for MES=F. Try a shorter date range.")
+        raise RuntimeError(f"Yahoo Finance returned no data for {YAHOO_TICKER}. Try a shorter date range.")
 
     df = df.reset_index()
 

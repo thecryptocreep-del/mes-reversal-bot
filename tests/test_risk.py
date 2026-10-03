@@ -30,9 +30,9 @@ def test_flatten_time_format():
     assert 0 <= minute <= 59
 
 
-def test_mes_point_value():
-    # MES is $5 per point
-    assert MES_POINT_VALUE == 5.0
+def test_point_value_positive():
+    # Point value must be positive regardless of instrument
+    assert MES_POINT_VALUE > 0
 
 
 def test_commission_per_side():
