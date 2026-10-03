@@ -1,0 +1,16 @@
+.env
+*.env
+.env.*
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+data/raw/
+data/processed/
+data/jev_shadow.jsonl
+*.csv
+!tests/fixtures/*.csv
+.pytest_cache/
