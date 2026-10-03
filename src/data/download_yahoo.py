@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import time
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -28,8 +27,6 @@ except ImportError:
     raise ImportError("yfinance is required: pip install yfinance")
 
 import pandas as pd
-
-YAHOO_5M_CHUNK_DAYS = 58  # stay safely under Yahoo's 60-day per-request cap
 
 
 def _fetch_chunk(ticker: yf.Ticker, start: date, end: date, interval: str) -> pd.DataFrame:
@@ -79,24 +76,10 @@ def download_yahoo(
     ticker = yf.Ticker(YAHOO_TICKER)
     chunks: list[pd.DataFrame] = []
 
-    if interval == "5m" and days > YAHOO_5M_CHUNK_DAYS:
-        # Split into overlapping chunks of YAHOO_5M_CHUNK_DAYS days
-        chunk_start = start
-        while chunk_start < end:
-            chunk_end = min(chunk_start + timedelta(days=YAHOO_5M_CHUNK_DAYS), end)
-            print(f"  Fetching chunk {chunk_start} → {chunk_end}...")
-            chunk = _fetch_chunk(ticker, chunk_start, chunk_end, interval)
-            if not chunk.empty:
-                chunks.append(chunk)
-            chunk_start = chunk_end - timedelta(days=2)  # 2-day overlap to avoid gaps
-            if chunk_start >= end:
-                break
-            time.sleep(1)  # be polite to Yahoo
-    else:
-        print(f"Downloading {YAHOO_TICKER} ({SYMBOL}) {interval} bars ({start} → {end})...")
-        chunk = _fetch_chunk(ticker, start, end, interval)
-        if not chunk.empty:
-            chunks.append(chunk)
+    print(f"Downloading {YAHOO_TICKER} ({SYMBOL}) {interval} bars ({start} → {end})...")
+    chunk = _fetch_chunk(ticker, start, end, interval)
+    if not chunk.empty:
+        chunks.append(chunk)
 
     if not chunks:
         raise RuntimeError(f"Yahoo Finance returned no data for {YAHOO_TICKER}.")
