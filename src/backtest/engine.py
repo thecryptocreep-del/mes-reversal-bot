@@ -61,6 +61,17 @@ class BacktestStats:
     sharpe: float  # daily Sharpe, annualized
 
 
+# Trading session window (ET) — only take signals within this window
+SESSION_START_ET = (8, 0)    # 8:00 AM ET
+SESSION_END_ET   = (11, 50)  # 11:50 AM ET
+
+
+def _in_session(ts: pd.Timestamp) -> bool:
+    """Return True if timestamp falls within the allowed trading session."""
+    t = (ts.hour, ts.minute)
+    return SESSION_START_ET <= t <= SESSION_END_ET
+
+
 def _simulate_trades(
     df: pd.DataFrame,
     cost_multiplier: float = 1.0,
@@ -68,9 +79,9 @@ def _simulate_trades(
     """
     Simulate trades on a bar DataFrame.
 
-    Entry: next bar's open after signal fires.
+    Entry: next bar's open after signal fires (only within 8:00–11:50 AM ET).
     Exit: next bar's open (1-bar hold), unless flatten time reached.
-    Risk rules enforced: max trades/day, daily loss limit, flatten time.
+    Risk rules enforced: session window, max trades/day, daily loss limit, flatten time.
     """
     signals = scan_signals(df)
     trades: list[TradeResult] = []
@@ -94,6 +105,11 @@ def _simulate_trades(
         signal_time = index[i]
         day_key = str(signal_time.date())
         entry_time = index[i + 1]
+
+        # Session window check — signal bar3 must close within session
+        if not _in_session(signal_time):
+            i += 1
+            continue
 
         # Flatten time check
         if entry_time.hour > flatten_hour or (
