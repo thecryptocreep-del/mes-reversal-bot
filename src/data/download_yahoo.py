@@ -50,7 +50,7 @@ def _fetch_chunk(ticker: yf.Ticker, start: date, end: date, interval: str) -> pd
 
 
 def download_yahoo(
-    days: int = 60,
+    days: int = 55,
     interval: str = "5m",
     output_path: str | None = None,
 ) -> pd.DataFrame:
@@ -96,7 +96,7 @@ def download_yahoo(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Download futures history from Yahoo Finance")
-    parser.add_argument("--days", type=int, default=60,
+    parser.add_argument("--days", type=int, default=55,
                         help="Calendar days of history to fetch (default 60)")
     parser.add_argument("--interval", choices=["5m", "1d"], default="5m")
     parser.add_argument("--output", type=str, default=None)

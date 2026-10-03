@@ -27,7 +27,7 @@ INSTRUMENT_CONFIG = {
     },
     "MNQ": {
         "symbol": "MNQ",
-        "yahoo_ticker": "MNQ=F",
+        "yahoo_ticker": "NQ=F",   # Yahoo doesn't carry MNQ=F; NQ=F has same price, different multiplier
         "exchange": "CME",
         "point_value": 2.0,       # $2 per point for Micro NQ
         "tick_size": 0.25,
