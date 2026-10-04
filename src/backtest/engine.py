@@ -25,9 +25,14 @@ from config.risk import (
     FLATTEN_TIME_ET,
     MAX_POSITION_CONTRACTS,
     MAX_TRADES_PER_DAY,
-    MES_POINT_VALUE,  # alias for POINT_VALUE
+    MIN_BAR2_EXTENSION_POINTS,
+    MES_POINT_VALUE,
     ROUND_TRIP_COST_USD,
+    SESSION_END_ET,
+    SESSION_START_ET,
     SLIPPAGE_POINTS_PER_SIDE,
+    STOP_POINTS,
+    TARGET_POINTS,
 )
 from config.settings import POINT_VALUE
 from src.strategy.three_bar_reversal import Signal, scan_signals
@@ -61,9 +66,7 @@ class BacktestStats:
     sharpe: float  # daily Sharpe, annualized
 
 
-# Trading session window (ET) — only take signals within this window
-SESSION_START_ET = (8, 0)    # 8:00 AM ET
-SESSION_END_ET   = (11, 50)  # 11:50 AM ET
+# Session window pulled from config/risk.py — do not redefine here
 
 
 def _in_session(ts: pd.Timestamp) -> bool:
@@ -77,23 +80,35 @@ def _simulate_trades(
     cost_multiplier: float = 1.0,
     stop_loss_usd: float | None = None,
     contracts: int = 1,
+    stop_points: float | None = None,
+    target_points: float | None = None,
+    min_extension: float | None = None,
 ) -> list[TradeResult]:
     """
     Simulate trades on a bar DataFrame.
 
-    Entry: next bar's open after signal fires (only within 8:00–11:50 AM ET).
-    Exit: stop hit intrabar OR flatten time close, whichever comes first.
-         If stop_loss_usd is None, exits at next bar's open (original 1-bar hold).
-
-    Stop logic: if the adverse extreme of any bar crosses the stop price,
-    the stop is assumed filled at the stop price (conservative — no gap assumed).
+    Entry:  next bar's open after signal fires (session window only).
+    Exit:   first of — target hit, stop hit, flatten time, end of data.
 
     Args:
-        stop_loss_usd: max dollar loss per trade per contract (e.g. 150 for MNQ).
-                       None = no stop, exit next bar open.
-        contracts: number of contracts (scales P&L and cost).
+        stop_points:   stop distance in points (default: STOP_POINTS from config).
+        target_points: profit target in points (default: TARGET_POINTS from config).
+        stop_loss_usd: override stop_points via dollar amount (legacy param).
+        min_extension: min bar2 extension filter (default: MIN_BAR2_EXTENSION_POINTS).
+        contracts:     number of contracts (scales P&L and cost).
     """
-    signals = scan_signals(df)
+    if stop_points is None and stop_loss_usd is None:
+        stop_points = STOP_POINTS
+    elif stop_loss_usd is not None:
+        stop_points = stop_loss_usd / (POINT_VALUE * contracts)
+
+    if target_points is None:
+        target_points = TARGET_POINTS
+
+    if min_extension is None:
+        min_extension = MIN_BAR2_EXTENSION_POINTS
+
+    signals = scan_signals(df, min_extension=min_extension)
     trades: list[TradeResult] = []
 
     flatten_hour, flatten_min = map(int, FLATTEN_TIME_ET.split(":"))
@@ -102,10 +117,10 @@ def _simulate_trades(
     daily_pnl: dict[str, float] = {}
 
     closes = df["close"].values
-    opens = df["open"].values
-    highs = df["high"].values
-    lows = df["low"].values
-    index = df.index
+    opens  = df["open"].values
+    highs  = df["high"].values
+    lows   = df["low"].values
+    index  = df.index
 
     i = 0
     while i < len(df) - 1:
@@ -143,14 +158,10 @@ def _simulate_trades(
         direction = 1 if sig == Signal.LONG else -1
         entry_price = opens[i + 1]
 
-        # Compute stop price in points
-        if stop_loss_usd is not None:
-            stop_points = stop_loss_usd / (POINT_VALUE * contracts)
-            stop_price = entry_price - direction * stop_points
-        else:
-            stop_price = None
+        stop_price = entry_price - direction * stop_points
+        target_price = entry_price + direction * target_points
 
-        # Walk forward bar by bar until stop hit, flatten time, or end of day
+        # Walk forward bar by bar until target/stop hit, flatten time, or end of day
         exit_price = None
         exit_time = None
         exit_idx = i + 1
@@ -165,35 +176,34 @@ def _simulate_trades(
             # New day — must have exited already (shouldn't happen, safety net)
             new_day = bar_time.date() != signal_time.date()
 
-            if stop_price is not None:
-                # Check if stop was hit on this bar's adverse extreme
-                if direction == 1 and lows[j] <= stop_price:
-                    exit_price = stop_price
-                    exit_time = bar_time
-                    exit_idx = j
-                    break
-                elif direction == -1 and highs[j] >= stop_price:
-                    exit_price = stop_price
-                    exit_time = bar_time
-                    exit_idx = j
-                    break
+            # Check target hit first (favorable extreme)
+            if direction == 1 and highs[j] >= target_price:
+                exit_price = target_price
+                exit_time = bar_time
+                exit_idx = j
+                break
+            elif direction == -1 and lows[j] <= target_price:
+                exit_price = target_price
+                exit_time = bar_time
+                exit_idx = j
+                break
+
+            # Check stop hit (adverse extreme)
+            if direction == 1 and lows[j] <= stop_price:
+                exit_price = stop_price
+                exit_time = bar_time
+                exit_idx = j
+                break
+            elif direction == -1 and highs[j] >= stop_price:
+                exit_price = stop_price
+                exit_time = bar_time
+                exit_idx = j
+                break
 
             if at_flatten or new_day:
                 exit_price = closes[j - 1] if j > i + 1 else closes[i + 1]
                 exit_time = index[j - 1] if j > i + 1 else index[i + 1]
                 exit_idx = j
-                break
-
-            # Default: exit at next bar's open (1-bar hold when no stop triggered)
-            if stop_price is None and j == i + 1:
-                next_j = j + 1
-                if next_j >= len(df):
-                    exit_price = closes[j]
-                    exit_time = bar_time
-                else:
-                    exit_price = opens[next_j]
-                    exit_time = index[next_j]
-                exit_idx = next_j
                 break
 
         if exit_price is None:
@@ -280,6 +290,9 @@ def run_is_oos(
     is_fraction: float = 0.70,
     stop_loss_usd: float | None = None,
     contracts: int = 1,
+    stop_points: float | None = None,
+    target_points: float | None = None,
+    min_extension: float | None = None,
 ) -> tuple[BacktestStats, BacktestStats, list[TradeResult], list[TradeResult]]:
     """
     Split into in-sample / out-of-sample and run backtest on each.
@@ -290,8 +303,11 @@ def run_is_oos(
     is_df = df.iloc[:split]
     oos_df = df.iloc[split:]
 
-    is_trades = _simulate_trades(is_df, stop_loss_usd=stop_loss_usd, contracts=contracts)
-    oos_trades = _simulate_trades(oos_df, stop_loss_usd=stop_loss_usd, contracts=contracts)
+    kw = dict(stop_loss_usd=stop_loss_usd, contracts=contracts,
+              stop_points=stop_points, target_points=target_points,
+              min_extension=min_extension)
+    is_trades = _simulate_trades(is_df, **kw)
+    oos_trades = _simulate_trades(oos_df, **kw)
 
     return _compute_stats(is_trades), _compute_stats(oos_trades), is_trades, oos_trades
 
@@ -302,6 +318,9 @@ def run_walk_forward(
     is_fraction: float = 0.70,
     stop_loss_usd: float | None = None,
     contracts: int = 1,
+    stop_points: float | None = None,
+    target_points: float | None = None,
+    min_extension: float | None = None,
 ) -> list[dict]:
     """
     Expanding-window walk-forward evaluation.
@@ -327,7 +346,9 @@ def run_walk_forward(
             fold_start = fold_end
             continue
 
-        oos_trades = _simulate_trades(oos_df, stop_loss_usd=stop_loss_usd, contracts=contracts)
+        oos_trades = _simulate_trades(oos_df, stop_loss_usd=stop_loss_usd, contracts=contracts,
+                                      stop_points=stop_points, target_points=target_points,
+                                      min_extension=min_extension)
         stats = _compute_stats(oos_trades)
 
         results.append({
@@ -351,6 +372,9 @@ def cost_sensitivity_table(
     multipliers: tuple[float, ...] = (0.0, 0.5, 1.0, 1.5, 2.0),
     stop_loss_usd: float | None = None,
     contracts: int = 1,
+    stop_points: float | None = None,
+    target_points: float | None = None,
+    min_extension: float | None = None,
 ) -> pd.DataFrame:
     """
     Show net P&L at various cost multiples to assess cost sensitivity.
@@ -358,7 +382,9 @@ def cost_sensitivity_table(
     rows = []
     for mult in multipliers:
         trades = _simulate_trades(df, cost_multiplier=mult,
-                                  stop_loss_usd=stop_loss_usd, contracts=contracts)
+                                  stop_loss_usd=stop_loss_usd, contracts=contracts,
+                                  stop_points=stop_points, target_points=target_points,
+                                  min_extension=min_extension)
         stats = _compute_stats(trades)
         assumed_cost = ROUND_TRIP_COST_USD * mult * contracts
         rows.append({
@@ -377,19 +403,30 @@ def cost_sensitivity_table(
 def run_scenario(
     df: pd.DataFrame,
     label: str,
-    stop_loss_usd: float,
+    stop_loss_usd: float | None = None,
     contracts: int = 1,
+    stop_points: float | None = None,
+    target_points: float | None = None,
+    min_extension: float | None = None,
 ) -> None:
     """Print a full report for one trading scenario (instrument + stop + contracts)."""
+    _stop = stop_points if stop_points is not None else STOP_POINTS
+    _tgt  = target_points if target_points is not None else TARGET_POINTS
+    _ext  = min_extension if min_extension is not None else MIN_BAR2_EXTENSION_POINTS
+    stop_usd = stop_loss_usd if stop_loss_usd is not None else _stop * POINT_VALUE * contracts
     print(f"\n{'#'*60}")
     print(f"  SCENARIO: {label}")
-    print(f"  Stop: ${stop_loss_usd}/trade  |  Contracts: {contracts}")
-    print(f"  Point value: ${POINT_VALUE}/pt  |  Max risk/trade: ${stop_loss_usd * contracts}")
+    print(f"  Stop: {_stop}pt (${stop_usd:.0f})  Target: {_tgt}pt  "
+          f"Min ext: {_ext}pt  Contracts: {contracts}")
+    print(f"  Point value: ${POINT_VALUE}/pt  |  R:R {_tgt/_stop:.1f}:1")
     print(f"{'#'*60}")
 
-    is_stats, oos_stats, _, _ = run_is_oos(df, stop_loss_usd=stop_loss_usd, contracts=contracts)
-    wf = run_walk_forward(df, stop_loss_usd=stop_loss_usd, contracts=contracts)
-    cost_table = cost_sensitivity_table(df, stop_loss_usd=stop_loss_usd, contracts=contracts)
+    kw = dict(stop_loss_usd=stop_loss_usd, contracts=contracts,
+              stop_points=stop_points, target_points=target_points,
+              min_extension=min_extension)
+    is_stats, oos_stats, _, _ = run_is_oos(df, **kw)
+    wf = run_walk_forward(df, **kw)
+    cost_table = cost_sensitivity_table(df, **kw)
     print_report(is_stats, oos_stats, wf, cost_table)
 
 
