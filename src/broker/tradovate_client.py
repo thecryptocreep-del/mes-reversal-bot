@@ -80,10 +80,10 @@ class TradovateClient:
         payload = {
             "name": self._username,
             "password": self._password,
-            "appId": "mes-reversal-bot",
-            "appVersion": "1.0",
-            "cid": 0,
-            "sec": "",
+            "appId": os.getenv("TRADOVATE_APP_ID", "Sample App"),
+            "appVersion": os.getenv("TRADOVATE_APP_VERSION", "1.0"),
+            "cid": int(os.getenv("TRADOVATE_CID", "0")),
+            "sec": os.getenv("TRADOVATE_SEC", ""),
         }
         async with self._session.post(
             f"{_BASE_REST}/auth/accesstokenrequest", json=payload
