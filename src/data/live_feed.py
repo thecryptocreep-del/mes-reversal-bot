@@ -1,8 +1,10 @@
 """
-WebSocket 5-minute bar builder for Tradovate market data.
+WebSocket 5-minute bar builder for live market data.
 
-Subscribes to MNQ (or configured instrument) via:
-  wss://md.tradovateapi.com/v1/websocket
+Broker selection via BROKER env var (default: projectx):
+
+  projectx  — wss://gateway.projectx.com/hubs/market  (SignalR)
+  tradovate — wss://md.tradovateapi.com/v1/websocket
 
 Accumulates tick/quote data into 5-min OHLCV bars.
 Fires on_bar callback when each 5-minute bar closes.
@@ -22,7 +24,10 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
-_MD_WS = "wss://md.tradovateapi.com/v1/websocket"
+_BROKER = os.getenv("BROKER", "projectx").lower()
+_MD_WS_TRADOVATE = "wss://md.tradovateapi.com/v1/websocket"
+_MD_WS_PROJECTX = "wss://gateway.projectx.com/hubs/market"
+_MD_WS = _MD_WS_PROJECTX if _BROKER == "projectx" else _MD_WS_TRADOVATE
 _BAR_SECONDS = 300  # 5-minute bars
 
 
@@ -120,41 +125,126 @@ class LiveFeed:
         self._running = True
         session = aiohttp.ClientSession()
         try:
-            async with session.ws_connect(
-                _MD_WS,
-                headers={"Authorization": f"Bearer {self._token}"},
-            ) as ws:
-                logger.info("LiveFeed connected to %s", _MD_WS)
-                # Subscribe to quotes
-                sub_msg = json.dumps(
-                    {"op": "md/subscribeQuote", "args": [self._symbol]}
-                )
-                await ws.send_str(sub_msg)
-
-                async for msg in ws:
-                    if msg.type == aiohttp.WSMsgType.TEXT:
-                        self._process_message(msg.data, time.time())
-                    elif msg.type in (
-                        aiohttp.WSMsgType.CLOSED,
-                        aiohttp.WSMsgType.ERROR,
-                    ):
-                        logger.warning("WebSocket closed/error: %s", msg.type)
-                        break
+            if _BROKER == "projectx":
+                await self._run_projectx(session)
+            else:
+                await self._run_tradovate(session)
         finally:
             await session.close()
             self._running = False
 
-    def _process_message(self, raw: str, now: float) -> None:
+    # ------------------------------------------------------------------
+    # ProjectX (SignalR) feed
+    # ------------------------------------------------------------------
+
+    async def _run_projectx(self, session: aiohttp.ClientSession) -> None:
+        """ProjectX SignalR WebSocket feed."""
+        headers: dict[str, str] = {}
+        api_key = os.getenv("PROJECTX_API_KEY")
+        if api_key:
+            headers["X-API-Key"] = api_key
+        elif self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+
+        async with session.ws_connect(_MD_WS, headers=headers) as ws:
+            logger.info("LiveFeed connected to ProjectX %s", _MD_WS)
+            # SignalR handshake
+            handshake = json.dumps({"protocol": "json", "version": 1}) + "\x1e"
+            await ws.send_str(handshake)
+            # Subscribe to market quotes
+            sub = (
+                json.dumps({
+                    "type": 1,
+                    "target": "SubscribeQuotes",
+                    "arguments": [self._symbol],
+                })
+                + "\x1e"
+            )
+            await ws.send_str(sub)
+
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    self._process_message_projectx(msg.data, time.time())
+                elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                    logger.warning("ProjectX WebSocket closed/error: %s", msg.type)
+                    break
+
+    def _process_message_projectx(self, raw: str, now: float) -> None:
+        """Parse SignalR frames (record-separator 0x1e delimited JSON)."""
+        try:
+            for frame in raw.split("\x1e"):
+                frame = frame.strip()
+                if not frame:
+                    continue
+                data = json.loads(frame)
+                # type 1 = Invocation; look for quote updates
+                if data.get("type") == 1:
+                    args = data.get("arguments", [])
+                    for arg in args:
+                        if isinstance(arg, dict):
+                            self._dispatch_projectx(arg, now)
+                        elif isinstance(arg, list):
+                            for item in arg:
+                                if isinstance(item, dict):
+                                    self._dispatch_projectx(item, now)
+        except Exception as exc:
+            logger.debug("ProjectX LiveFeed parse error: %s", exc)
+
+    def _dispatch_projectx(self, evt: dict, ts: float) -> None:
+        """Handle a single quote/trade event from ProjectX."""
+        # Accept lastPrice, tradePrice, bidPrice, askPrice
+        price = (
+            evt.get("lastPrice")
+            or evt.get("tradePrice")
+            or evt.get("bidPrice")
+            or evt.get("askPrice")
+        )
+        if price:
+            size = float(evt.get("volume", evt.get("tradeSize", 0.0)))
+            bar = self._handle_price(float(price), size, ts)
+            if bar is not None:
+                try:
+                    self._on_bar(bar)
+                except Exception as exc:
+                    logger.error("on_bar callback error: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Tradovate feed (legacy)
+    # ------------------------------------------------------------------
+
+    async def _run_tradovate(self, session: aiohttp.ClientSession) -> None:
+        """Tradovate market-data WebSocket feed."""
+        async with session.ws_connect(
+            _MD_WS_TRADOVATE,
+            headers={"Authorization": f"Bearer {self._token}"},
+        ) as ws:
+            logger.info("LiveFeed connected to Tradovate %s", _MD_WS_TRADOVATE)
+            sub_msg = json.dumps(
+                {"op": "md/subscribeQuote", "args": [self._symbol]}
+            )
+            await ws.send_str(sub_msg)
+
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    self._process_message_tradovate(msg.data, time.time())
+                elif msg.type in (
+                    aiohttp.WSMsgType.CLOSED,
+                    aiohttp.WSMsgType.ERROR,
+                ):
+                    logger.warning("Tradovate WebSocket closed/error: %s", msg.type)
+                    break
+
+    def _process_message_tradovate(self, raw: str, now: float) -> None:
         try:
             # Tradovate frames: "a[...]" array or "h" heartbeat
             if raw.startswith("a"):
                 events = json.loads(raw[1:])
                 for evt in events:
-                    self._dispatch(evt, now)
+                    self._dispatch_tradovate(evt, now)
         except Exception as exc:
-            logger.debug("LiveFeed parse error: %s", exc)
+            logger.debug("Tradovate LiveFeed parse error: %s", exc)
 
-    def _dispatch(self, evt: dict, ts: float) -> None:
+    def _dispatch_tradovate(self, evt: dict, ts: float) -> None:
         if evt.get("e") == "md" and "d" in evt:
             data = evt["d"]
             quotes = data.get("quotes", [])
@@ -167,3 +257,10 @@ class LiveFeed:
                             self._on_bar(bar)
                         except Exception as exc:
                             logger.error("on_bar callback error: %s", exc)
+
+    # Keep old entry point name for backward compat
+    def _process_message(self, raw: str, now: float) -> None:
+        if _BROKER == "projectx":
+            self._process_message_projectx(raw, now)
+        else:
+            self._process_message_tradovate(raw, now)

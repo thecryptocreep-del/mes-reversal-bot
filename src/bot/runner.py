@@ -22,8 +22,14 @@ from config.settings import LIVE_MODE, SYMBOL
 from src.bot.jev_logger import JevLogger
 from src.bot.risk_manager import RiskManager
 from src.bot.signal_engine import SignalEngine
-from src.broker.tradovate_client import TradovateClient
 from src.data.live_feed import Bar, LiveFeed
+
+# Broker selection: BROKER=projectx (default) or BROKER=tradovate
+_BROKER = os.getenv("BROKER", "projectx").lower()
+if _BROKER == "tradovate":
+    from src.broker.tradovate_client import TradovateClient as _BrokerClient  # type: ignore[assignment]
+else:
+    from src.broker.projectx_client import ProjectXClient as _BrokerClient  # type: ignore[assignment]
 from src.strategy.three_bar_reversal import Signal
 
 logging.basicConfig(
@@ -38,14 +44,14 @@ if LIVE_MODE:
     logger.warning("LIVE MODE ENABLED — real orders will be placed!")
     logger.warning("=" * 60)
 else:
-    logger.info("Paper mode — demo.tradovateapi.com")
+    logger.info("Paper mode — broker=%s", _BROKER)
 
 
 class Bot:
     """Orchestrates the live trading loop."""
 
     def __init__(self) -> None:
-        self._client = TradovateClient()
+        self._client = _BrokerClient()
         self._risk = RiskManager()
         self._signal_engine = SignalEngine()
         self._jev = JevLogger()
