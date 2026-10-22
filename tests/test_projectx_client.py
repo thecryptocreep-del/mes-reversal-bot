@@ -1,6 +1,9 @@
 """
 Tests for ProjectXClient — all HTTP calls are mocked.
 Auth: userName + apiKey → POST /Auth/loginKey → bearer token
+Accounts: POST /Account/search
+Contracts: POST /Contract/available
+Orders: POST /Order/place
 """
 from __future__ import annotations
 
@@ -51,11 +54,10 @@ def set_credentials(monkeypatch):
 
 @pytest.fixture()
 def client():
-    from src.broker.projectx_client import ProjectXClient
+    from src.broker.projectx_client import ProjectXClient, _Token
     c = ProjectXClient()
-    # Pre-inject a valid token so individual tests don't need to mock auth
-    from src.broker.projectx_client import _Token
     c._token = _Token(access_token="test-bearer-token")
+    c._session = MagicMock()
     return c
 
 
@@ -145,14 +147,13 @@ def test_token_expired():
 
 
 # ---------------------------------------------------------------------------
-# get_account_info
+# get_account_info — POST /Account/search
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_get_account_info_list(client):
     accounts_data = [{"id": 42, "name": "Eval-1", "balance": 50000.0, "dailyPnl": -120.5}]
-    client._session = MagicMock()
-    client._session.get = MagicMock(return_value=_make_response(accounts_data))
+    client._session.post = MagicMock(return_value=_make_response(accounts_data))
     result = await client.get_account_info()
     assert result["account_id"] == 42
     assert result["name"] == "Eval-1"
@@ -164,28 +165,66 @@ async def test_get_account_info_list(client):
 @pytest.mark.asyncio
 async def test_get_account_info_wrapped(client):
     accounts_data = {"accounts": [{"id": 7, "name": "Paper", "balance": 10000.0}]}
-    client._session = MagicMock()
-    client._session.get = MagicMock(return_value=_make_response(accounts_data))
+    client._session.post = MagicMock(return_value=_make_response(accounts_data))
     result = await client.get_account_info()
     assert result["account_id"] == 7
 
 
 @pytest.mark.asyncio
 async def test_get_account_info_empty_raises(client):
-    client._session = MagicMock()
-    client._session.get = MagicMock(return_value=_make_response([]))
-    with pytest.raises(RuntimeError, match="No ProjectX accounts"):
+    client._session.post = MagicMock(return_value=_make_response([]))
+    with pytest.raises(RuntimeError, match="No active"):
         await client.get_account_info()
 
 
 # ---------------------------------------------------------------------------
-# place_bracket_order
+# get_contract_id — POST /Contract/available
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_contract_id_found(client):
+    contracts_data = [
+        {"id": "CON.F.US.MNQ.Z25", "name": "Micro E-mini Nasdaq MNQ Dec 2025"},
+        {"id": "CON.F.US.ES.Z25", "name": "E-mini S&P 500 ES Dec 2025"},
+    ]
+    client._session.post = MagicMock(return_value=_make_response(contracts_data))
+    cid = await client.get_contract_id("MNQ")
+    assert cid == "CON.F.US.MNQ.Z25"
+
+
+@pytest.mark.asyncio
+async def test_get_contract_id_wrapped(client):
+    data = {"contracts": [{"id": "CON.F.US.MNQ.Z25", "name": "MNQ Dec 2025"}]}
+    client._session.post = MagicMock(return_value=_make_response(data))
+    cid = await client.get_contract_id("MNQ")
+    assert cid == "CON.F.US.MNQ.Z25"
+
+
+@pytest.mark.asyncio
+async def test_get_contract_id_cached(client):
+    client._contract_cache["MNQ"] = "CON.F.US.MNQ.Z25"
+    # Should not call the API at all
+    client._session.post = MagicMock(side_effect=AssertionError("Should not call API"))
+    cid = await client.get_contract_id("MNQ")
+    assert cid == "CON.F.US.MNQ.Z25"
+
+
+@pytest.mark.asyncio
+async def test_get_contract_id_not_found_raises(client):
+    client._session.post = MagicMock(return_value=_make_response([]))
+    with pytest.raises(RuntimeError, match="not found"):
+        await client.get_contract_id("UNKNOWN")
+
+
+# ---------------------------------------------------------------------------
+# place_bracket_order — POST /Order/place (x3: entry + stop + target)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_place_bracket_order_returns_order_id(client):
-    client._session = MagicMock()
-    client._session.post = MagicMock(return_value=_make_response({"orderId": 999}))
+    client._account_id = 42
+    client._contract_cache["MNQ"] = "CON.F.US.MNQ.Z25"
+    client._session.post = MagicMock(return_value=_make_response({"orderId": 999, "success": True}))
     oid = await client.place_bracket_order(
         symbol="MNQ", direction="Buy", qty=1,
         entry_price=20000.0, stop_price=19960.0, target_price=20060.0,
@@ -195,15 +234,17 @@ async def test_place_bracket_order_returns_order_id(client):
 
 @pytest.mark.asyncio
 async def test_place_bracket_order_uses_id_key(client):
-    client._session = MagicMock()
-    client._session.post = MagicMock(return_value=_make_response({"id": 555}))
+    client._account_id = 42
+    client._contract_cache["MNQ"] = "CON.F.US.MNQ.Z25"
+    client._session.post = MagicMock(return_value=_make_response({"id": 555, "success": True}))
     oid = await client.place_bracket_order("MNQ", "Sell", 1, 20000.0, 20040.0, 19940.0)
     assert oid == 555
 
 
 @pytest.mark.asyncio
 async def test_place_bracket_order_raises_if_no_id(client):
-    client._session = MagicMock()
+    client._account_id = 42
+    client._contract_cache["MNQ"] = "CON.F.US.MNQ.Z25"
     client._session.post = MagicMock(return_value=_make_response({"status": "ok"}))
     with pytest.raises(RuntimeError, match="no id"):
         await client.place_bracket_order("MNQ", "Buy", 1, 20000.0, 19960.0, 20060.0)
@@ -212,40 +253,92 @@ async def test_place_bracket_order_raises_if_no_id(client):
 @pytest.mark.asyncio
 async def test_place_bracket_order_includes_account_id(client):
     client._account_id = 42
-    posted_body: list = []
+    posted_bodies: list = []
 
     async def mock_post(path, body):
-        posted_body.append(body)
-        return {"orderId": 1}
+        posted_bodies.append((path, body))
+        return {"orderId": 1, "success": True}
 
     client._post = mock_post  # type: ignore[method-assign]
+    client._contract_cache["MNQ"] = "CON.F.US.MNQ.Z25"
     oid = await client.place_bracket_order("MNQ", "Buy", 1, 20000.0, 19960.0, 20060.0)
     assert oid == 1
-    assert posted_body[0]["accountId"] == 42
+    assert all(b["accountId"] == 42 for _, b in posted_bodies)
+
+
+@pytest.mark.asyncio
+async def test_place_bracket_order_places_three_orders(client):
+    client._account_id = 42
+    call_paths: list = []
+
+    async def mock_post(path, body):
+        call_paths.append(path)
+        return {"orderId": 1, "success": True}
+
+    client._post = mock_post  # type: ignore[method-assign]
+    client._contract_cache["MNQ"] = "CON.F.US.MNQ.Z25"
+    await client.place_bracket_order("MNQ", "Buy", 1, 20000.0, 19960.0, 20060.0)
+    assert call_paths.count("/Order/place") == 3
+
+
+@pytest.mark.asyncio
+async def test_place_bracket_order_buy_side_codes(client):
+    client._account_id = 42
+    bodies: list = []
+
+    async def mock_post(path, body):
+        bodies.append(body)
+        return {"orderId": 1, "success": True}
+
+    client._post = mock_post  # type: ignore[method-assign]
+    client._contract_cache["MNQ"] = "CON.F.US.MNQ.Z25"
+    await client.place_bracket_order("MNQ", "Buy", 1, 20000.0, 19960.0, 20060.0)
+    from src.broker.projectx_client import SIDE_BUY, SIDE_SELL
+    assert bodies[0]["side"] == SIDE_BUY    # entry
+    assert bodies[1]["side"] == SIDE_SELL   # stop exit
+    assert bodies[2]["side"] == SIDE_SELL   # target exit
+
+
+@pytest.mark.asyncio
+async def test_place_bracket_order_sell_side_codes(client):
+    client._account_id = 42
+    bodies: list = []
+
+    async def mock_post(path, body):
+        bodies.append(body)
+        return {"orderId": 2, "success": True}
+
+    client._post = mock_post  # type: ignore[method-assign]
+    client._contract_cache["MNQ"] = "CON.F.US.MNQ.Z25"
+    await client.place_bracket_order("MNQ", "Sell", 1, 20000.0, 20040.0, 19940.0)
+    from src.broker.projectx_client import SIDE_BUY, SIDE_SELL
+    assert bodies[0]["side"] == SIDE_SELL   # entry
+    assert bodies[1]["side"] == SIDE_BUY    # stop exit
+    assert bodies[2]["side"] == SIDE_BUY    # target exit
 
 
 # ---------------------------------------------------------------------------
-# cancel_order
+# cancel_order — POST /Order/cancel
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_cancel_order(client):
-    client._session = MagicMock()
-    client._session.delete = MagicMock(return_value=_make_delete_response(204))
+    client._session.post = MagicMock(return_value=_make_response({"success": True}))
     await client.cancel_order(123)
+    call_args = client._session.post.call_args
+    assert "/Order/cancel" in call_args[0][0]
 
 
 # ---------------------------------------------------------------------------
-# get_position
+# get_position — POST /Position/search
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_get_position_found(client):
     positions = [
-        {"symbol": "MNQ", "netPosition": 2, "averagePrice": 20001.0, "unrealizedPnl": 50.0}
+        {"contractId": "CON.F.US.MNQ.Z25", "netPosition": 2, "averagePrice": 20001.0, "unrealizedPnl": 50.0}
     ]
-    client._session = MagicMock()
-    client._session.get = MagicMock(return_value=_make_response(positions))
+    client._session.post = MagicMock(return_value=_make_response(positions))
     pos = await client.get_position("MNQ")
     assert pos["net_pos"] == 2
     assert pos["avg_price"] == 20001.0
@@ -254,8 +347,7 @@ async def test_get_position_found(client):
 
 @pytest.mark.asyncio
 async def test_get_position_not_found_returns_zero(client):
-    client._session = MagicMock()
-    client._session.get = MagicMock(return_value=_make_response([]))
+    client._session.post = MagicMock(return_value=_make_response([]))
     pos = await client.get_position("MNQ")
     assert pos["net_pos"] == 0
     assert pos["avg_price"] == 0.0
@@ -263,9 +355,8 @@ async def test_get_position_not_found_returns_zero(client):
 
 @pytest.mark.asyncio
 async def test_get_position_wrapped_key(client):
-    data = {"positions": [{"symbol": "MNQ", "netPosition": -1, "averagePrice": 18000.0}]}
-    client._session = MagicMock()
-    client._session.get = MagicMock(return_value=_make_response(data))
+    data = {"positions": [{"contractId": "CON.F.US.MNQ.Z25", "netPosition": -1, "averagePrice": 18000.0}]}
+    client._session.post = MagicMock(return_value=_make_response(data))
     pos = await client.get_position("MNQ")
     assert pos["net_pos"] == -1
 
