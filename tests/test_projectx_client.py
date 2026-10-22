@@ -1,20 +1,20 @@
 """
 Tests for ProjectXClient — all HTTP calls are mocked.
+Auth: userName + apiKey → POST /Auth/loginKey → bearer token
 """
 from __future__ import annotations
 
-import os
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _make_response(json_data, status=200):
-    """Return a mock aiohttp response context manager."""
     resp = AsyncMock()
     resp.status = status
     resp.raise_for_status = MagicMock()
@@ -36,82 +36,95 @@ def _make_delete_response(status=204):
     return cm
 
 
+AUTH_OK = {"token": "test-bearer-token", "success": True, "errorCode": 0, "errorMessage": None}
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
-def set_api_key(monkeypatch):
+def set_credentials(monkeypatch):
     monkeypatch.setenv("PROJECTX_API_KEY", "test-api-key-abc")
-    monkeypatch.delenv("PROJECTX_USERNAME", raising=False)
-    monkeypatch.delenv("PROJECTX_PASSWORD", raising=False)
+    monkeypatch.setenv("PROJECTX_USERNAME", "testuser")
 
 
 @pytest.fixture()
 def client():
-    # Import after env vars are set
     from src.broker.projectx_client import ProjectXClient
-    return ProjectXClient()
+    c = ProjectXClient()
+    # Pre-inject a valid token so individual tests don't need to mock auth
+    from src.broker.projectx_client import _Token
+    c._token = _Token(access_token="test-bearer-token")
+    return c
 
 
 # ---------------------------------------------------------------------------
 # Construction / auth
 # ---------------------------------------------------------------------------
 
-def test_client_init_with_api_key():
+def test_client_init_with_credentials():
     from src.broker.projectx_client import ProjectXClient
     c = ProjectXClient()
     assert c._api_key == "test-api-key-abc"
+    assert c._username == "testuser"
 
 
-def test_client_init_with_username_password(monkeypatch):
+def test_client_init_missing_api_key(monkeypatch):
     monkeypatch.delenv("PROJECTX_API_KEY", raising=False)
-    monkeypatch.setenv("PROJECTX_USERNAME", "user")
-    monkeypatch.setenv("PROJECTX_PASSWORD", "pass")
-    from src.broker.projectx_client import ProjectXClient
-    c = ProjectXClient()
-    assert c._username == "user"
-    assert c._password == "pass"
-
-
-def test_client_init_no_credentials(monkeypatch):
-    monkeypatch.delenv("PROJECTX_API_KEY", raising=False)
-    monkeypatch.delenv("PROJECTX_USERNAME", raising=False)
-    monkeypatch.delenv("PROJECTX_PASSWORD", raising=False)
     from src.broker.projectx_client import ProjectXClient
     with pytest.raises(RuntimeError, match="PROJECTX_API_KEY"):
         ProjectXClient()
 
 
-def test_api_key_headers(client):
-    headers = client._headers()
-    assert headers == {"X-API-Key": "test-api-key-abc"}
+def test_client_init_missing_username(monkeypatch):
+    monkeypatch.delenv("PROJECTX_USERNAME", raising=False)
+    from src.broker.projectx_client import ProjectXClient
+    with pytest.raises(RuntimeError, match="PROJECTX_USERNAME"):
+        ProjectXClient()
 
+
+def test_bearer_headers(client):
+    headers = client._headers()
+    assert headers == {"Authorization": "Bearer test-bearer-token"}
+
+
+# ---------------------------------------------------------------------------
+# authenticate — POST /Auth/loginKey
+# ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_authenticate_with_username_password(monkeypatch):
-    monkeypatch.delenv("PROJECTX_API_KEY", raising=False)
-    monkeypatch.setenv("PROJECTX_USERNAME", "user")
-    monkeypatch.setenv("PROJECTX_PASSWORD", "pass")
+async def test_authenticate_success():
     from src.broker.projectx_client import ProjectXClient
     c = ProjectXClient()
     c._session = MagicMock()
-    c._session.post = MagicMock(return_value=_make_response({"token": "tok123"}))
+    c._session.post = MagicMock(return_value=_make_response(AUTH_OK))
     await c.authenticate()
     assert c._token is not None
-    assert c._token.access_token == "tok123"
+    assert c._token.access_token == "test-bearer-token"
 
 
 @pytest.mark.asyncio
-async def test_authenticate_raises_on_missing_token(monkeypatch):
-    monkeypatch.delenv("PROJECTX_API_KEY", raising=False)
-    monkeypatch.setenv("PROJECTX_USERNAME", "user")
-    monkeypatch.setenv("PROJECTX_PASSWORD", "pass")
+async def test_authenticate_invalid_credentials():
     from src.broker.projectx_client import ProjectXClient
     c = ProjectXClient()
     c._session = MagicMock()
-    c._session.post = MagicMock(return_value=_make_response({"error": "bad creds"}))
-    with pytest.raises(RuntimeError, match="no token"):
+    c._session.post = MagicMock(
+        return_value=_make_response({"token": None, "success": False, "errorCode": 3})
+    )
+    with pytest.raises(RuntimeError, match="errorCode=3"):
+        await c.authenticate()
+
+
+@pytest.mark.asyncio
+async def test_authenticate_agreements_not_signed():
+    from src.broker.projectx_client import ProjectXClient
+    c = ProjectXClient()
+    c._session = MagicMock()
+    c._session.post = MagicMock(
+        return_value=_make_response({"token": None, "success": False, "errorCode": 7})
+    )
+    with pytest.raises(RuntimeError, match="agreements"):
         await c.authenticate()
 
 
@@ -174,12 +187,8 @@ async def test_place_bracket_order_returns_order_id(client):
     client._session = MagicMock()
     client._session.post = MagicMock(return_value=_make_response({"orderId": 999}))
     oid = await client.place_bracket_order(
-        symbol="MES",
-        direction="Buy",
-        qty=1,
-        entry_price=5000.0,
-        stop_price=4990.0,
-        target_price=5010.0,
+        symbol="MNQ", direction="Buy", qty=1,
+        entry_price=20000.0, stop_price=19960.0, target_price=20060.0,
     )
     assert oid == 999
 
@@ -188,7 +197,7 @@ async def test_place_bracket_order_returns_order_id(client):
 async def test_place_bracket_order_uses_id_key(client):
     client._session = MagicMock()
     client._session.post = MagicMock(return_value=_make_response({"id": 555}))
-    oid = await client.place_bracket_order("MES", "Sell", 1, 5000.0, 5010.0, 4990.0)
+    oid = await client.place_bracket_order("MNQ", "Sell", 1, 20000.0, 20040.0, 19940.0)
     assert oid == 555
 
 
@@ -197,7 +206,7 @@ async def test_place_bracket_order_raises_if_no_id(client):
     client._session = MagicMock()
     client._session.post = MagicMock(return_value=_make_response({"status": "ok"}))
     with pytest.raises(RuntimeError, match="no id"):
-        await client.place_bracket_order("MES", "Buy", 1, 5000.0, 4990.0, 5010.0)
+        await client.place_bracket_order("MNQ", "Buy", 1, 20000.0, 19960.0, 20060.0)
 
 
 @pytest.mark.asyncio
@@ -205,17 +214,12 @@ async def test_place_bracket_order_includes_account_id(client):
     client._account_id = 42
     posted_body: list = []
 
-    async def fake_post(url, headers=None, json=None):
-        posted_body.append(json)
-        return _make_response({"orderId": 1}).__aenter__.return_value
-
-    # Patch _post directly to capture payload
     async def mock_post(path, body):
         posted_body.append(body)
         return {"orderId": 1}
 
     client._post = mock_post  # type: ignore[method-assign]
-    oid = await client.place_bracket_order("MES", "Buy", 1, 5000.0, 4990.0, 5010.0)
+    oid = await client.place_bracket_order("MNQ", "Buy", 1, 20000.0, 19960.0, 20060.0)
     assert oid == 1
     assert posted_body[0]["accountId"] == 42
 
@@ -228,7 +232,6 @@ async def test_place_bracket_order_includes_account_id(client):
 async def test_cancel_order(client):
     client._session = MagicMock()
     client._session.delete = MagicMock(return_value=_make_delete_response(204))
-    # Should not raise
     await client.cancel_order(123)
 
 
@@ -239,13 +242,13 @@ async def test_cancel_order(client):
 @pytest.mark.asyncio
 async def test_get_position_found(client):
     positions = [
-        {"symbol": "MES", "netPosition": 2, "averagePrice": 5001.0, "unrealizedPnl": 50.0}
+        {"symbol": "MNQ", "netPosition": 2, "averagePrice": 20001.0, "unrealizedPnl": 50.0}
     ]
     client._session = MagicMock()
     client._session.get = MagicMock(return_value=_make_response(positions))
-    pos = await client.get_position("MES")
+    pos = await client.get_position("MNQ")
     assert pos["net_pos"] == 2
-    assert pos["avg_price"] == 5001.0
+    assert pos["avg_price"] == 20001.0
     assert pos["open_pnl"] == 50.0
 
 
@@ -253,7 +256,7 @@ async def test_get_position_found(client):
 async def test_get_position_not_found_returns_zero(client):
     client._session = MagicMock()
     client._session.get = MagicMock(return_value=_make_response([]))
-    pos = await client.get_position("MES")
+    pos = await client.get_position("MNQ")
     assert pos["net_pos"] == 0
     assert pos["avg_price"] == 0.0
 
@@ -278,6 +281,7 @@ async def test_context_manager():
     with patch.object(_aiohttp, "ClientSession") as MockSession:
         mock_sess = AsyncMock()
         mock_sess.close = AsyncMock()
+        mock_sess.post = MagicMock(return_value=_make_response(AUTH_OK))
         MockSession.return_value = mock_sess
         c = ProjectXClient()
         async with c:

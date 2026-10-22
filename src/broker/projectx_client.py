@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 
 LIVE_MODE = os.getenv("LIVE_MODE", "0") == "1"
 
-_BASE_REST = "https://gateway.projectx.com/api/v1"
-_WS_MARKET = "wss://gateway.projectx.com/hubs/market"
+_BASE_REST = "https://api.topstepx.com/api"
+_WS_MARKET = "wss://api.topstepx.com/hubs/market"
 
 TOKEN_TTL_SECONDS = 23 * 3600  # refresh before 24 h expiry
 
@@ -48,10 +48,11 @@ class ProjectXClient:
     def __init__(self) -> None:
         self._api_key: Optional[str] = os.getenv("PROJECTX_API_KEY")
         self._username: Optional[str] = os.getenv("PROJECTX_USERNAME")
-        self._password: Optional[str] = os.getenv("PROJECTX_PASSWORD")
-        if not self._api_key and not (self._username and self._password):
+        if not self._api_key or not self._username:
             raise RuntimeError(
-                "Set PROJECTX_API_KEY or both PROJECTX_USERNAME and PROJECTX_PASSWORD"
+                "Set both PROJECTX_API_KEY and PROJECTX_USERNAME env vars.\n"
+                "Find your username in TopstepX platform (not your email).\n"
+                "Generate an API key at topstepx.com/settings?tab=api"
             )
         self._token: Optional[_Token] = None
         self._session: Optional[aiohttp.ClientSession] = None
@@ -76,41 +77,44 @@ class ProjectXClient:
     # ------------------------------------------------------------------
 
     async def _ensure_auth(self) -> None:
-        """Ensure we have valid credentials (token or API key)."""
-        if self._api_key:
-            # API-key auth: no token needed — key goes in header every call
-            return
         if self._token is None or self._token.is_expired():
             await self.authenticate()
 
     async def authenticate(self) -> None:
         """
-        Obtain a bearer token via username/password.
-        Called automatically; can also be called manually to pre-warm auth.
+        Obtain a bearer token via Topstep's loginKey endpoint.
+        POST /Auth/loginKey  {userName, apiKey}  → {token, success, errorCode}
         """
-        if self._api_key:
-            logger.info("ProjectX: using API-key auth (no token needed)")
-            return
         assert self._session is not None
         payload = {
             "userName": self._username,
-            "password": self._password,
+            "apiKey": self._api_key,
         }
         async with self._session.post(
-            f"{_BASE_REST}/auth/token", json=payload
+            f"{_BASE_REST}/Auth/loginKey",
+            json=payload,
+            headers={"accept": "text/plain", "Content-Type": "application/json"},
         ) as resp:
             resp.raise_for_status()
             data = await resp.json()
-        token_value = data.get("token") or data.get("accessToken") or data.get("access_token")
-        if not token_value:
-            raise RuntimeError(f"ProjectX auth failed — no token in response: {data}")
-        self._token = _Token(access_token=token_value)
-        logger.info("ProjectX token acquired (LIVE_MODE=%s)", LIVE_MODE)
+
+        if not data.get("success"):
+            code = data.get("errorCode")
+            msg = data.get("errorMessage") or ""
+            hints = {
+                3: "Wrong userName or apiKey — use your platform login username, not email",
+                7: "Accept pending agreements at topstepx.com first",
+                9: "No active API subscription on this account",
+                10: "API key auth is disabled — contact Topstep support",
+            }
+            raise RuntimeError(
+                f"Topstep auth failed (errorCode={code}): {hints.get(code, msg) or data}"
+            )
+
+        self._token = _Token(access_token=data["token"])
+        logger.info("Topstep token acquired (LIVE_MODE=%s)", LIVE_MODE)
 
     def _headers(self) -> dict[str, str]:
-        """Build auth headers for a request."""
-        if self._api_key:
-            return {"X-API-Key": self._api_key}
         assert self._token is not None
         return {"Authorization": f"Bearer {self._token.access_token}"}
 
