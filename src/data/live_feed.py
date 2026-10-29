@@ -228,35 +228,16 @@ class LiveFeed:
             logger.debug("ProjectX LiveFeed parse error: %s", exc)
 
     def _dispatch_projectx_quote(self, q: dict, ts: float) -> None:
-        """GatewayQuote payload: use lastPrice when present, else mid."""
-        price = q.get("lastPrice")
-        if price is None:
-            bid = q.get("bestBid")
-            ask = q.get("bestAsk")
-            if bid and ask:
-                price = (bid + ask) / 2.0
-        if price:
-            bar = self._handle_price(float(price), 0.0, ts)
-            if bar is not None:
-                try:
-                    self._on_bar(bar)
-                except Exception as exc:
-                    logger.error("on_bar callback error: %s", exc)
+        """GatewayQuote: ignored for bar building — trades carry volume and price."""
+        pass
 
     def _dispatch_projectx_trade(self, t: dict, ts: float) -> None:
-        """GatewayTrade payload: use price + volume for accurate bars."""
+        """GatewayTrade: build bars from actual trades using wall-clock time."""
         price = t.get("price")
         if price:
             size = float(t.get("volume", 0.0))
-            # Parse trade timestamp for accurate bar slotting
-            ts_str = t.get("timestamp")
-            if ts_str:
-                try:
-                    from datetime import datetime, timezone
-                    dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                    ts = dt.timestamp()
-                except Exception:
-                    pass
+            # Always use wall-clock ts — trade timestamps can lag and cause
+            # duplicate bar closes when they arrive slightly behind the slot boundary
             bar = self._handle_price(float(price), size, ts)
             if bar is not None:
                 try:
