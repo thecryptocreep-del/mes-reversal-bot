@@ -123,19 +123,31 @@ class LiveFeed:
         return None
 
     async def run(self) -> None:
-        """Connect and stream until cancelled."""
+        """Connect and stream until cancelled. Auto-reconnects on disconnect."""
         self._running = True
-        session = aiohttp.ClientSession()
-        try:
-            if _BROKER == "projectx":
-                await self._run_projectx(session)
-            else:
-                await self._run_tradovate(session)
-        except Exception as exc:
-            logger.error("LiveFeed run error: %s", exc, exc_info=True)
-        finally:
-            await session.close()
-            self._running = False
+        backoff = 5
+        attempt = 0
+        while self._running:
+            attempt += 1
+            session = aiohttp.ClientSession()
+            try:
+                if attempt > 1:
+                    logger.info("LiveFeed reconnecting (attempt %d)…", attempt)
+                if _BROKER == "projectx":
+                    await self._run_projectx(session)
+                else:
+                    await self._run_tradovate(session)
+            except asyncio.CancelledError:
+                self._running = False
+                break
+            except Exception as exc:
+                logger.error("LiveFeed error: %s — reconnecting in %ds", exc, backoff)
+            finally:
+                await session.close()
+            if self._running:
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)  # cap at 60s
+        self._running = False
 
     # ------------------------------------------------------------------
     # ProjectX (SignalR) feed
