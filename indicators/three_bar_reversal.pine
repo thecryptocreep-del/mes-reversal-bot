@@ -1,0 +1,165 @@
+//@version=5
+indicator(
+    title="3-Bar Reversal [MNQ/NQ]",
+    shorttitle="3BR",
+    overlay=true,
+    max_labels_count=500,
+    max_lines_count=500
+)
+
+// ─── Inputs ──────────────────────────────────────────────────────────────────
+grp_filter = "Signal Filters"
+min_ext     = input.float(2.0,  "Min Bar2 Extension (pts)",  minval=0.0, step=0.25, group=grp_filter,
+              tooltip="Bar2 must close this many points beyond Bar1's extreme. 0 = no filter.")
+prox        = input.float(20.0, "Key Level Proximity (pts)", minval=0.0, step=1.0,  group=grp_filter,
+              tooltip="Bar2 extreme must be within this many points of a key level. 0 = disable level filter.")
+
+grp_levels = "Key Levels"
+show_pdh    = input.bool(true,  "Show Prior Day High/Low", group=grp_levels)
+show_or     = input.bool(true,  "Show Opening Range H/L",  group=grp_levels)
+show_pdc    = input.bool(true,  "Show Prior Day Close",    group=grp_levels)
+show_wopen  = input.bool(true,  "Show Weekly Open",        group=grp_levels)
+or_minutes  = input.int(15,     "Opening Range Minutes",   minval=5, maxval=60, step=5, group=grp_levels)
+
+grp_tp = "Stop & Target"
+stop_pts    = input.float(40.0, "Stop (pts)",   minval=1.0, step=0.25, group=grp_tp)
+target_pts  = input.float(60.0, "Target (pts)", minval=1.0, step=0.25, group=grp_tp)
+show_levels = input.bool(true,  "Draw Stop/Target Lines on Signal", group=grp_tp)
+
+grp_session = "Session"
+sess_start  = input.session("0900-1150", "Trading Session (ET)", group=grp_session)
+
+grp_alert = "Alerts"
+alert_long  = input.bool(true, "Alert on Long Signal",  group=grp_alert)
+alert_short = input.bool(true, "Alert on Short Signal", group=grp_alert)
+
+// ─── Session filter ───────────────────────────────────────────────────────────
+in_session = not na(time(timeframe.period, sess_start, "America/New_York"))
+
+// ─── Key Levels ───────────────────────────────────────────────────────────────
+// Prior Day High / Low / Close
+[pdh, pdl, pdc] = request.security(syminfo.tickerid, "1D",
+    [high[1], low[1], close[1]], lookahead=barmerge.lookahead_on)
+
+// Weekly Open
+weekly_open = request.security(syminfo.tickerid, "W",
+    open, lookahead=barmerge.lookahead_on)
+
+// Opening Range: track high/low of first `or_minutes` of RTH each day
+var float or_high = na
+var float or_low  = na
+var bool  or_done = false
+var int   or_day  = na
+
+is_rth_open = hour(time, "America/New_York") == 9 and
+              minute(time, "America/New_York") == 30
+new_day = dayofweek != dayofweek[1]
+
+if new_day
+    or_done := false
+    or_day  := dayofmonth
+
+rth_minute = (hour(time, "America/New_York") - 9) * 60 + minute(time, "America/New_York") - 30
+
+if rth_minute >= 0 and rth_minute < or_minutes and not or_done
+    or_high := na(or_high) or new_day ? high : math.max(or_high, high)
+    or_low  := na(or_low)  or new_day ? low  : math.min(or_low,  low)
+
+if rth_minute >= or_minutes
+    or_done := true
+
+// ─── Level proximity check ────────────────────────────────────────────────────
+near_level(price) =>
+    if prox <= 0.0
+        true
+    else
+        (not na(pdh)        and math.abs(price - pdh)        <= prox) or
+        (not na(pdl)        and math.abs(price - pdl)        <= prox) or
+        (not na(pdc)        and math.abs(price - pdc)        <= prox) or
+        (not na(or_high)    and math.abs(price - or_high)    <= prox) or
+        (not na(or_low)     and math.abs(price - or_low)     <= prox) or
+        (not na(weekly_open)and math.abs(price - weekly_open)<= prox)
+
+// ─── Three-Bar Reversal Pattern ───────────────────────────────────────────────
+// bar1 = 2 bars ago, bar2 = 1 bar ago, bar3 = current (just closed)
+b1_high  = high[2]
+b1_low   = low[2]
+b2_close = close[1]
+b2_high  = high[1]
+b2_low   = low[1]
+b3_close = close
+
+long_raw  = b2_close < (b1_low  - min_ext) and b3_close > b1_high
+short_raw = b2_close > (b1_high + min_ext) and b3_close < b1_low
+
+// Apply key level filter on bar2's extreme
+long_signal  = long_raw  and in_session and near_level(b2_low)
+short_signal = short_raw and in_session and near_level(b2_high)
+
+// ─── Entry / Stop / Target prices ────────────────────────────────────────────
+// Entry on next bar's open (bar4) — we show the signal on bar3
+entry_long  = close       // proxy; actual entry is bar4 open
+entry_short = close
+
+stop_long   = entry_long  - stop_pts
+tgt_long    = entry_long  + target_pts
+stop_short  = entry_short + stop_pts
+tgt_short   = entry_short - target_pts
+
+// ─── Plots ────────────────────────────────────────────────────────────────────
+// Signal arrows
+plotshape(long_signal,  title="Long Signal",  style=shape.triangleup,
+    location=location.belowbar, color=color.new(color.lime, 0),
+    size=size.normal, text="LONG\n▶ Bar4 open")
+
+plotshape(short_signal, title="Short Signal", style=shape.triangledown,
+    location=location.abovebar, color=color.new(color.red, 0),
+    size=size.normal, text="SHORT\n▶ Bar4 open")
+
+// Stop / Target lines on signal bars
+if show_levels and long_signal
+    line.new(bar_index, stop_long,   bar_index + 10, stop_long,
+        color=color.red,   width=1, style=line.style_dashed)
+    line.new(bar_index, tgt_long,    bar_index + 10, tgt_long,
+        color=color.green, width=1, style=line.style_dashed)
+    label.new(bar_index + 10, stop_long,
+        "SL " + str.tostring(stop_pts) + "pts",
+        color=color.new(color.red, 80), textcolor=color.red, size=size.small)
+    label.new(bar_index + 10, tgt_long,
+        "TP " + str.tostring(target_pts) + "pts",
+        color=color.new(color.green, 80), textcolor=color.green, size=size.small)
+
+if show_levels and short_signal
+    line.new(bar_index, stop_short,  bar_index + 10, stop_short,
+        color=color.red,   width=1, style=line.style_dashed)
+    line.new(bar_index, tgt_short,   bar_index + 10, tgt_short,
+        color=color.green, width=1, style=line.style_dashed)
+    label.new(bar_index + 10, stop_short,
+        "SL " + str.tostring(stop_pts) + "pts",
+        color=color.new(color.red, 80), textcolor=color.red, size=size.small)
+    label.new(bar_index + 10, tgt_short,
+        "TP " + str.tostring(target_pts) + "pts",
+        color=color.new(color.green, 80), textcolor=color.green, size=size.small)
+
+// Key level lines
+plot(show_pdh and not na(pdh) ? pdh : na,
+    "PDH", color=color.new(color.orange, 40), linewidth=1, style=plot.style_linebr)
+plot(show_pdh and not na(pdl) ? pdl : na,
+    "PDL", color=color.new(color.orange, 40), linewidth=1, style=plot.style_linebr)
+plot(show_pdc and not na(pdc) ? pdc : na,
+    "PDC", color=color.new(color.yellow, 50), linewidth=1, style=plot.style_linebr)
+plot(show_or and not na(or_high) ? or_high : na,
+    "ORH", color=color.new(color.aqua, 40), linewidth=1, style=plot.style_linebr)
+plot(show_or and not na(or_low) ? or_low : na,
+    "ORL", color=color.new(color.aqua, 40), linewidth=1, style=plot.style_linebr)
+plot(show_wopen and not na(weekly_open) ? weekly_open : na,
+    "Weekly Open", color=color.new(color.purple, 40), linewidth=1, style=plot.style_linebr)
+
+// ─── Alerts ───────────────────────────────────────────────────────────────────
+alertcondition(long_signal  and alert_long,
+    title="3BR Long Signal",
+    message="3-Bar Reversal LONG on {{ticker}} {{interval}} @ {{close}} | Stop: {{plot_0}} | Target: {{plot_1}} | Enter on Bar4 open")
+
+alertcondition(short_signal and alert_short,
+    title="3BR Short Signal",
+    message="3-Bar Reversal SHORT on {{ticker}} {{interval}} @ {{close}} | Stop: {{plot_0}} | Target: {{plot_1}} | Enter on Bar4 open")

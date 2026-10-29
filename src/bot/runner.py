@@ -24,6 +24,7 @@ from src.bot.risk_manager import RiskManager
 from src.bot.signal_engine import SignalEngine
 from src.data.live_feed import Bar, LiveFeed
 from src.strategy.key_levels import DayLevels, bar2_at_level
+from src.bot.notifier import send_signal_alert
 
 # Key levels filter settings (tune via env vars)
 _USE_KEY_LEVELS = os.getenv("USE_KEY_LEVELS", "1") == "1"
@@ -148,6 +149,14 @@ class Bot:
             entry_price,
             stop_price,
             target_price,
+        )
+
+        send_signal_alert(
+            direction=signal.name,
+            symbol=SYMBOL,
+            entry_price=entry_price,
+            stop_price=stop_price,
+            target_price=target_price,
         )
 
         asyncio.create_task(
