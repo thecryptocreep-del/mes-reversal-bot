@@ -193,7 +193,8 @@ class Bot:
         # Build fresh levels — PDH/PDL/PDC require yesterday's bars which we
         # don't have in the live feed, so start with what we can compute today.
         # The opening range fills in after 9:45 ET from the first bars.
-        self._today_levels = DayLevels(date=bar.timestamp.normalize())
+        import pandas as _pd
+        self._today_levels = DayLevels(date=_pd.Timestamp(bar.timestamp).normalize())
         logger.info("New trading day %s — levels reset, waiting for opening range", day_str)
 
     async def _flatten_position(self) -> None:

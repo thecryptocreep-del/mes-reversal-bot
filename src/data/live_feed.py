@@ -186,41 +186,65 @@ class LiveFeed:
             logger.error("ProjectX WebSocket error: %s", exc, exc_info=True)
 
     def _process_message_projectx(self, raw: str, now: float) -> None:
-        """Parse SignalR frames (record-separator 0x1e delimited JSON)."""
+        """Parse SignalR frames (record-separator 0x1e delimited JSON).
+
+        Topstep hub emits two targets:
+          GatewayQuote  — args: [contractId, {lastPrice, bestBid, bestAsk, ...}]
+          GatewayTrade  — args: [contractId, [{price, volume, ...}, ...]]
+        """
         try:
             for frame in raw.split("\x1e"):
                 frame = frame.strip()
                 if not frame:
                     continue
                 data = json.loads(frame)
-                # type 1 = Invocation; look for quote updates
-                if data.get("type") == 1:
-                    logger.debug("SignalR invoke target=%s", data.get("target"))
-                    args = data.get("arguments", [])
-                    for arg in args:
-                        if isinstance(arg, dict):
-                            self._dispatch_projectx(arg, now)
-                        elif isinstance(arg, list):
-                            for item in arg:
-                                if isinstance(item, dict):
-                                    self._dispatch_projectx(item, now)
+                if data.get("type") != 1:
+                    continue
+                target = data.get("target", "")
+                args = data.get("arguments", [])
+                # args[0] = contractId string, args[1] = payload
+                if len(args) < 2:
+                    continue
+                payload = args[1]
+                if target == "GatewayQuote" and isinstance(payload, dict):
+                    self._dispatch_projectx_quote(payload, now)
+                elif target == "GatewayTrade" and isinstance(payload, list):
+                    for trade in payload:
+                        if isinstance(trade, dict):
+                            self._dispatch_projectx_trade(trade, now)
         except Exception as exc:
             logger.debug("ProjectX LiveFeed parse error: %s", exc)
 
-    def _dispatch_projectx(self, evt: dict, ts: float) -> None:
-        """Handle a single quote/trade event from ProjectX."""
-        # Accept lastPrice, tradePrice, bidPrice, askPrice
-        price = (
-            evt.get("lastPrice")
-            or evt.get("tradePrice")
-            or evt.get("price")
-            or evt.get("bidPrice")
-            or evt.get("askPrice")
-        )
-        if not price:
-            logger.debug("ProjectX event with no price field: keys=%s", list(evt.keys()))
+    def _dispatch_projectx_quote(self, q: dict, ts: float) -> None:
+        """GatewayQuote payload: use lastPrice when present, else mid."""
+        price = q.get("lastPrice")
+        if price is None:
+            bid = q.get("bestBid")
+            ask = q.get("bestAsk")
+            if bid and ask:
+                price = (bid + ask) / 2.0
         if price:
-            size = float(evt.get("volume", evt.get("tradeSize", 0.0)))
+            bar = self._handle_price(float(price), 0.0, ts)
+            if bar is not None:
+                try:
+                    self._on_bar(bar)
+                except Exception as exc:
+                    logger.error("on_bar callback error: %s", exc)
+
+    def _dispatch_projectx_trade(self, t: dict, ts: float) -> None:
+        """GatewayTrade payload: use price + volume for accurate bars."""
+        price = t.get("price")
+        if price:
+            size = float(t.get("volume", 0.0))
+            # Parse trade timestamp for accurate bar slotting
+            ts_str = t.get("timestamp")
+            if ts_str:
+                try:
+                    from datetime import datetime, timezone
+                    dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    ts = dt.timestamp()
+                except Exception:
+                    pass
             bar = self._handle_price(float(price), size, ts)
             if bar is not None:
                 try:
