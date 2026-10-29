@@ -129,6 +129,8 @@ class LiveFeed:
                 await self._run_projectx(session)
             else:
                 await self._run_tradovate(session)
+        except Exception as exc:
+            logger.error("LiveFeed run error: %s", exc, exc_info=True)
         finally:
             await session.close()
             self._running = False
@@ -140,34 +142,31 @@ class LiveFeed:
     async def _run_projectx(self, session: aiohttp.ClientSession) -> None:
         """ProjectX SignalR WebSocket feed."""
         headers: dict[str, str] = {}
-        api_key = os.getenv("PROJECTX_API_KEY")
-        if api_key:
-            headers["X-API-Key"] = api_key
-        elif self._token:
+        if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
 
-        async with session.ws_connect(_MD_WS, headers=headers) as ws:
-            logger.info("LiveFeed connected to ProjectX %s", _MD_WS)
-            # SignalR handshake
-            handshake = json.dumps({"protocol": "json", "version": 1}) + "\x1e"
-            await ws.send_str(handshake)
-            # Subscribe to market quotes
-            sub = (
-                json.dumps({
-                    "type": 1,
-                    "target": "SubscribeQuotes",
-                    "arguments": [self._symbol],
-                })
-                + "\x1e"
-            )
-            await ws.send_str(sub)
+        logger.info("LiveFeed connecting to %s", _MD_WS)
+        try:
+            async with session.ws_connect(_MD_WS, headers=headers) as ws:
+                logger.info("LiveFeed connected to ProjectX %s", _MD_WS)
+                # SignalR handshake
+                handshake = json.dumps({"protocol": "json", "version": 1}) + "\x1e"
+                await ws.send_str(handshake)
+                # Subscribe to market quotes
+                sub = json.dumps({"type": 1, "target": "SubscribeQuotes", "arguments": [self._symbol]}) + "\x1e"
+                await ws.send_str(sub)
+                logger.info("LiveFeed subscribed to %s quotes — waiting for bars", self._symbol)
 
-            async for msg in ws:
-                if msg.type == aiohttp.WSMsgType.TEXT:
-                    self._process_message_projectx(msg.data, time.time())
-                elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                    logger.warning("ProjectX WebSocket closed/error: %s", msg.type)
-                    break
+                async for msg in ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        self._process_message_projectx(msg.data, time.time())
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        logger.warning("ProjectX WebSocket closed/error: %s", msg.data)
+                        break
+        except aiohttp.WSServerHandshakeError as exc:
+            logger.error("WebSocket handshake failed (HTTP %s) — check bearer token: %s", exc.status, exc)
+        except Exception as exc:
+            logger.error("ProjectX WebSocket error: %s", exc, exc_info=True)
 
     def _process_message_projectx(self, raw: str, now: float) -> None:
         """Parse SignalR frames (record-separator 0x1e delimited JSON)."""
