@@ -9,9 +9,14 @@ DAILY_LOSS_LIMIT_USD   = 150.0
 MAX_TRADES_PER_DAY     = 6
 FLATTEN_TIME_ET        = "15:55"
 
-# Session window (ET) — data-driven: 9am has 5× the volume of 8am
-SESSION_START_ET = (9, 0)
-SESSION_END_ET   = (11, 50)
+# Session window (ET) — override via SESSION_START / SESSION_END env vars (HH:MM)
+import os as _os
+def _parse_hhmm(val: str) -> tuple:
+    h, m = val.split(":")
+    return (int(h), int(m))
+
+SESSION_START_ET = _parse_hhmm(_os.getenv("SESSION_START", "09:00"))
+SESSION_END_ET   = _parse_hhmm(_os.getenv("SESSION_END",   "11:50"))
 
 # Stop and target in points — derived from 55-day MNQ market structure analysis
 # Stop  = 1 ATR (40pts covers 90th pct MAE at 1 bar)
