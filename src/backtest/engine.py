@@ -36,6 +36,7 @@ from config.risk import (
 )
 from config.settings import POINT_VALUE
 from src.strategy.three_bar_reversal import Signal, scan_signals
+from src.strategy.key_levels import build_level_map, bar2_at_level
 
 
 @dataclass
@@ -83,6 +84,8 @@ def _simulate_trades(
     stop_points: float | None = None,
     target_points: float | None = None,
     min_extension: float | None = None,
+    use_key_levels: bool = False,
+    level_proximity: float = 10.0,
 ) -> list[TradeResult]:
     """
     Simulate trades on a bar DataFrame.
@@ -91,11 +94,13 @@ def _simulate_trades(
     Exit:   first of — target hit, stop hit, flatten time, end of data.
 
     Args:
-        stop_points:   stop distance in points (default: STOP_POINTS from config).
-        target_points: profit target in points (default: TARGET_POINTS from config).
-        stop_loss_usd: override stop_points via dollar amount (legacy param).
-        min_extension: min bar2 extension filter (default: MIN_BAR2_EXTENSION_POINTS).
-        contracts:     number of contracts (scales P&L and cost).
+        stop_points:      stop distance in points (default: STOP_POINTS from config).
+        target_points:    profit target in points (default: TARGET_POINTS from config).
+        stop_loss_usd:    override stop_points via dollar amount (legacy param).
+        min_extension:    min bar2 extension filter (default: MIN_BAR2_EXTENSION_POINTS).
+        contracts:        number of contracts (scales P&L and cost).
+        use_key_levels:   only take signals where bar2 extends into a key level.
+        level_proximity:  points within which bar2 extreme must be to a key level.
     """
     if stop_points is None and stop_loss_usd is None:
         stop_points = STOP_POINTS
@@ -115,6 +120,8 @@ def _simulate_trades(
 
     daily_trades: dict[str, int] = {}
     daily_pnl: dict[str, float] = {}
+
+    level_map = build_level_map(df) if use_key_levels else {}
 
     closes = df["close"].values
     opens  = df["open"].values
@@ -137,6 +144,20 @@ def _simulate_trades(
         if not _in_session(signal_time):
             i += 1
             continue
+
+        # Key level filter — bar2 (i-1) must extend into a key level
+        if use_key_levels:
+            day_levels = level_map.get(day_key)
+            direction = 1 if sig == Signal.LONG else -1
+            if day_levels is None or not bar2_at_level(
+                bar2_high=highs[i - 1],
+                bar2_low=lows[i - 1],
+                signal_direction=direction,
+                levels=day_levels,
+                proximity_points=level_proximity,
+            ):
+                i += 1
+                continue
 
         # Flatten time check on entry bar
         if entry_time.hour > flatten_hour or (
@@ -293,6 +314,8 @@ def run_is_oos(
     stop_points: float | None = None,
     target_points: float | None = None,
     min_extension: float | None = None,
+    use_key_levels: bool = False,
+    level_proximity: float = 10.0,
 ) -> tuple[BacktestStats, BacktestStats, list[TradeResult], list[TradeResult]]:
     """
     Split into in-sample / out-of-sample and run backtest on each.
@@ -305,7 +328,8 @@ def run_is_oos(
 
     kw = dict(stop_loss_usd=stop_loss_usd, contracts=contracts,
               stop_points=stop_points, target_points=target_points,
-              min_extension=min_extension)
+              min_extension=min_extension, use_key_levels=use_key_levels,
+              level_proximity=level_proximity)
     is_trades = _simulate_trades(is_df, **kw)
     oos_trades = _simulate_trades(oos_df, **kw)
 
