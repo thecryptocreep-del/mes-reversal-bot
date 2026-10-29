@@ -152,13 +152,29 @@ class LiveFeed:
                 # SignalR handshake
                 handshake = json.dumps({"protocol": "json", "version": 1}) + "\x1e"
                 await ws.send_str(handshake)
-                # Subscribe to market quotes
-                sub = json.dumps({"type": 1, "target": "SubscribeQuotes", "arguments": [self._symbol]}) + "\x1e"
-                await ws.send_str(sub)
-                logger.info("LiveFeed subscribed to %s quotes — waiting for bars", self._symbol)
+                logger.info("LiveFeed sent handshake — waiting for server ack")
 
+                # Give server a moment to respond to handshake
+                await asyncio.sleep(0.5)
+
+                # Try subscribing with contractId format (e.g. CON.F.US.MNQ.Z26)
+                # Fall back to plain symbol if PROJECTX_CONTRACT_ID not set
+                contract_id = os.getenv("PROJECTX_CONTRACT_ID", self._symbol)
+                sub = json.dumps({"type": 1, "target": "SubscribeContractTrades", "arguments": [contract_id]}) + "\x1e"
+                await ws.send_str(sub)
+                logger.info("LiveFeed sent SubscribeContractTrades for %s", contract_id)
+
+                # Also try quotes subscription
+                sub2 = json.dumps({"type": 1, "target": "SubscribeContractQuotes", "arguments": [contract_id]}) + "\x1e"
+                await ws.send_str(sub2)
+                logger.info("LiveFeed sent SubscribeContractQuotes for %s — waiting for data", contract_id)
+
+                msg_count = 0
                 async for msg in ws:
                     if msg.type == aiohttp.WSMsgType.TEXT:
+                        msg_count += 1
+                        if msg_count <= 10:
+                            logger.info("RAW WS msg #%d: %s", msg_count, msg.data[:300])
                         self._process_message_projectx(msg.data, time.time())
                     elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                         logger.warning("ProjectX WebSocket closed/error: %s", msg.data)
@@ -178,6 +194,7 @@ class LiveFeed:
                 data = json.loads(frame)
                 # type 1 = Invocation; look for quote updates
                 if data.get("type") == 1:
+                    logger.debug("SignalR invoke target=%s", data.get("target"))
                     args = data.get("arguments", [])
                     for arg in args:
                         if isinstance(arg, dict):
@@ -195,9 +212,12 @@ class LiveFeed:
         price = (
             evt.get("lastPrice")
             or evt.get("tradePrice")
+            or evt.get("price")
             or evt.get("bidPrice")
             or evt.get("askPrice")
         )
+        if not price:
+            logger.debug("ProjectX event with no price field: keys=%s", list(evt.keys()))
         if price:
             size = float(evt.get("volume", evt.get("tradeSize", 0.0)))
             bar = self._handle_price(float(price), size, ts)
