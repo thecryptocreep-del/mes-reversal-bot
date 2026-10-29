@@ -235,10 +235,19 @@ class Bot:
             acct = await self._client.get_account_info()
             logger.info("Account: %s  cash=%.2f", acct.get("name"), acct.get("cash", 0))
 
+            # Resolve contractId via REST API (needed for WS subscription)
+            try:
+                contract_id = await self._client.get_contract_id(SYMBOL)
+                logger.info("Resolved contractId: %s", contract_id)
+            except Exception as exc:
+                logger.warning("Could not resolve contractId (%s) — using symbol %s", exc, SYMBOL)
+                contract_id = SYMBOL
+
             feed = LiveFeed(
                 access_token=self._client._token.access_token,  # type: ignore[union-attr]
                 symbol=SYMBOL,
                 on_bar=self._on_bar,
+                contract_id=contract_id,
             )
             feed_task = asyncio.create_task(feed.run())
             await asyncio.wait(

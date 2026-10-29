@@ -88,9 +88,11 @@ class LiveFeed:
         symbol: str,
         on_bar: Callable[[Bar], None],
         bar_seconds: int = _BAR_SECONDS,
+        contract_id: str = "",
     ) -> None:
         self._token = access_token
         self._symbol = symbol
+        self._contract_id = contract_id or os.getenv("PROJECTX_CONTRACT_ID", symbol)
         self._on_bar = on_bar
         self._bar_seconds = bar_seconds
         self._acc = _BarAccumulator()
@@ -157,17 +159,16 @@ class LiveFeed:
                 # Give server a moment to respond to handshake
                 await asyncio.sleep(0.5)
 
-                # Try subscribing with contractId format (e.g. CON.F.US.MNQ.Z26)
-                # Fall back to plain symbol if PROJECTX_CONTRACT_ID not set
-                contract_id = os.getenv("PROJECTX_CONTRACT_ID", self._symbol)
-                sub = json.dumps({"type": 1, "target": "SubscribeContractTrades", "arguments": [contract_id]}) + "\x1e"
-                await ws.send_str(sub)
-                logger.info("LiveFeed sent SubscribeContractTrades for %s", contract_id)
+                cid = self._contract_id
+                logger.info("LiveFeed subscribing with contractId=%s", cid)
 
-                # Also try quotes subscription
-                sub2 = json.dumps({"type": 1, "target": "SubscribeContractQuotes", "arguments": [contract_id]}) + "\x1e"
-                await ws.send_str(sub2)
-                logger.info("LiveFeed sent SubscribeContractQuotes for %s — waiting for data", contract_id)
+                # Try all likely SignalR target names — server silently ignores unknown ones
+                for target in ("SubscribeContractTrades", "SubscribeContractQuotes", "SubscribeQuotes"):
+                    sub = json.dumps({"type": 1, "target": target, "arguments": [cid]}) + "\x1e"
+                    await ws.send_str(sub)
+                    logger.info("LiveFeed sent %s(%s)", target, cid)
+
+                logger.info("LiveFeed subscriptions sent — waiting for data")
 
                 msg_count = 0
                 async for msg in ws:
