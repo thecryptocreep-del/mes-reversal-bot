@@ -72,6 +72,11 @@ short_raw = b2_close > (b1_high + min_ext) and b3_close < b1_low
 long_signal = long_raw and in_session and near_level(b2_low)
 short_signal = short_raw and in_session and near_level(b2_high)
 
+// Anticipation alerts — fire on bar2 close (5 min early warning)
+// bar1 = 1 bar ago, bar2 = current bar just closed
+anticipate_long = close < (high[1] - min_ext) and in_session and near_level(close)
+anticipate_short = close > (low[1] + min_ext) and in_session and near_level(close)
+
 // Entry / Stop / Target
 stop_long = close - stop_pts
 tgt_long = close + target_pts
@@ -99,6 +104,14 @@ plot(show_or and not na(or_high) ? or_high : na, "ORH", color=color.new(color.aq
 plot(show_or and not na(or_low) ? or_low : na, "ORL", color=color.new(color.aqua, 40), linewidth=1, style=plot.style_linebr)
 plot(show_wopen and not na(weekly_open) ? weekly_open : na, "Weekly Open", color=color.new(color.purple, 40), linewidth=1, style=plot.style_linebr)
 
-// Alerts
-alertcondition(long_signal and alert_long, title="3BR Long Signal", message="3-Bar Reversal LONG on {{ticker}} {{interval}} @ {{close}} | Enter on Bar4 open")
-alertcondition(short_signal and alert_short, title="3BR Short Signal", message="3-Bar Reversal SHORT on {{ticker}} {{interval}} @ {{close}} | Enter on Bar4 open")
+// Anticipation markers (small dots on bar2 close)
+plotshape(anticipate_long, title="Anticipate Long", style=shape.circle, location=location.belowbar, color=color.new(color.lime, 50), size=size.tiny, text="?")
+plotshape(anticipate_short, title="Anticipate Short", style=shape.circle, location=location.abovebar, color=color.new(color.red, 50), size=size.tiny, text="?")
+
+// Alerts - confirmed (bot style, bar3 close)
+alertcondition(long_signal and alert_long, title="3BR Long Signal CONFIRMED", message="3-Bar Reversal LONG CONFIRMED on {{ticker}} {{interval}} @ {{close}} | BOT entering Bar4 open | Stop -40pts | Target +60pts")
+alertcondition(short_signal and alert_short, title="3BR Short Signal CONFIRMED", message="3-Bar Reversal SHORT CONFIRMED on {{ticker}} {{interval}} @ {{close}} | BOT entering Bar4 open | Stop -40pts | Target +60pts")
+
+// Alerts - anticipation (manual style, bar2 close)
+alertcondition(anticipate_long, title="3BR Long WATCH (bar2)", message="3-Bar Reversal WATCH LONG on {{ticker}} {{interval}} @ {{close}} | Bar2 extended DOWN - watch for bar3 to close ABOVE bar1 high to confirm | MANUAL entry on bar3 close")
+alertcondition(anticipate_short, title="3BR Short WATCH (bar2)", message="3-Bar Reversal WATCH SHORT on {{ticker}} {{interval}} @ {{close}} | Bar2 extended UP - watch for bar3 to close BELOW bar1 low to confirm | MANUAL entry on bar3 close")
