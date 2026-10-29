@@ -39,10 +39,19 @@ else:
     from src.broker.projectx_client import ProjectXClient as _BrokerClient  # type: ignore[assignment]
 from src.strategy.three_bar_reversal import Signal
 
+import pathlib as _pathlib
+_log_dir = _pathlib.Path("logs")
+_log_dir.mkdir(exist_ok=True)
+_log_file = _log_dir / f"bot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%S",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(_log_file, encoding="utf-8"),
+    ],
 )
 logger = logging.getLogger(__name__)
 
