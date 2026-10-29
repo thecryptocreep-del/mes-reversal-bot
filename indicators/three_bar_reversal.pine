@@ -1,11 +1,5 @@
 //@version=5
-indicator(
-    title="3-Bar Reversal [MNQ/NQ]",
-    shorttitle="3BR",
-    overlay=true,
-    max_labels_count=500,
-    max_lines_count=500
-)
+indicator(title="3-Bar Reversal [MNQ/NQ]", shorttitle="3BR", overlay=true, max_labels_count=500, max_lines_count=500)
 
 // ─── Inputs ──────────────────────────────────────────────────────────────────
 grp_filter = "Signal Filters"
