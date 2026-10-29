@@ -17,12 +17,18 @@ import signal
 import sys
 from datetime import datetime, timezone
 
-from config.risk import MAX_POSITION_CONTRACTS, STOP_POINTS, TARGET_POINTS
+from config.risk import MAX_POSITION_CONTRACTS, STOP_POINTS, TARGET_POINTS, MIN_BAR2_EXTENSION_POINTS
 from config.settings import LIVE_MODE, SYMBOL
 from src.bot.jev_logger import JevLogger
 from src.bot.risk_manager import RiskManager
 from src.bot.signal_engine import SignalEngine
 from src.data.live_feed import Bar, LiveFeed
+from src.strategy.key_levels import DayLevels, bar2_at_level
+
+# Key levels filter settings (tune via env vars)
+_USE_KEY_LEVELS = os.getenv("USE_KEY_LEVELS", "1") == "1"
+_LEVEL_PROXIMITY = float(os.getenv("LEVEL_PROXIMITY", "20.0"))
+_MIN_EXTENSION = float(os.getenv("MIN_EXTENSION", str(MIN_BAR2_EXTENSION_POINTS)))
 
 # Broker selection: BROKER=projectx (default) or BROKER=tradovate
 _BROKER = os.getenv("BROKER", "projectx").lower()
@@ -53,10 +59,12 @@ class Bot:
     def __init__(self) -> None:
         self._client = _BrokerClient()
         self._risk = RiskManager()
-        self._signal_engine = SignalEngine()
+        self._signal_engine = SignalEngine(min_extension=_MIN_EXTENSION)
         self._jev = JevLogger()
         self._current_order_id: int | None = None
         self._shutdown = asyncio.Event()
+        self._today_levels: DayLevels | None = None
+        self._levels_date: str = ""
 
     # ------------------------------------------------------------------
     # Bar handler
@@ -66,6 +74,9 @@ class Bot:
         """Called when each 5-min bar closes. Runs synchronously in the event loop."""
         now_et = datetime.now()
         ts_str = bar.timestamp.strftime("%Y-%m-%d %H:%M")
+
+        # Update day levels
+        self._update_levels_for_bar(bar)
 
         # Status line
         print(
@@ -100,6 +111,19 @@ class Bot:
         b1, b2, b3 = bars_deque[0], bars_deque[1], bars_deque[2]
 
         direction = "Buy" if signal == Signal.LONG else "Sell"
+
+        # Key levels filter
+        if _USE_KEY_LEVELS:
+            sig_direction = 1 if signal == Signal.LONG else -1
+            if self._today_levels is None or not bar2_at_level(
+                bar2_high=b2.high,
+                bar2_low=b2.low,
+                signal_direction=sig_direction,
+                levels=self._today_levels,
+                proximity_points=_LEVEL_PROXIMITY,
+            ):
+                logger.info("Signal %s skipped — bar2 not at a key level", signal.name)
+                return
         entry_price = bar.close
         if signal == Signal.LONG:
             stop_price = entry_price - STOP_POINTS
@@ -150,6 +174,18 @@ class Bot:
             self._risk.record_trade(0.0)  # P&L updated when position closes
         except Exception as exc:
             logger.error("Order placement failed: %s", exc)
+
+    def _update_levels_for_bar(self, bar: Bar) -> None:
+        """Refresh today's DayLevels when the date changes."""
+        day_str = bar.timestamp.strftime("%Y-%m-%d")
+        if day_str == self._levels_date:
+            return
+        self._levels_date = day_str
+        # Build fresh levels — PDH/PDL/PDC require yesterday's bars which we
+        # don't have in the live feed, so start with what we can compute today.
+        # The opening range fills in after 9:45 ET from the first bars.
+        self._today_levels = DayLevels(date=bar.timestamp.normalize())
+        logger.info("New trading day %s — levels reset, waiting for opening range", day_str)
 
     async def _flatten_position(self) -> None:
         logger.info("Flatten time reached — closing any open position")
