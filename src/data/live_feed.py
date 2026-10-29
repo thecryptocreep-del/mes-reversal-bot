@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 _BROKER = os.getenv("BROKER", "projectx").lower()
 _MD_WS_TRADOVATE = "wss://md.tradovateapi.com/v1/websocket"
-_MD_WS_PROJECTX = "wss://gateway.projectx.com/hubs/market"
+_MD_WS_PROJECTX = "wss://api.topstepx.com/hubs/market"
 _MD_WS = _MD_WS_PROJECTX if _BROKER == "projectx" else _MD_WS_TRADOVATE
 _BAR_SECONDS = 300  # 5-minute bars
 

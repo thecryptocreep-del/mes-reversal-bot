@@ -227,6 +227,11 @@ class Bot:
         signal.signal(signal.SIGTERM, _sigint_handler)
 
         async with self._client:
+            # Use specific account if set, otherwise take first active account
+            target_id = os.getenv("PROJECTX_ACCOUNT_ID")
+            if target_id:
+                self._client._account_id = int(target_id)
+                logger.info("Using account ID %s from env", target_id)
             acct = await self._client.get_account_info()
             logger.info("Account: %s  cash=%.2f", acct.get("name"), acct.get("cash", 0))
 
