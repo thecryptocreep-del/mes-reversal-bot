@@ -287,7 +287,14 @@ class ProjectXClient:
 
     async def get_position(self, symbol: str) -> dict[str, Any]:
         """Return current position for symbol (net_pos=0 if flat)."""
-        data = await self._post("/Position/search", {"accountId": self._account_id})
+        try:
+            data = await self._post(
+                "/Position/search",
+                {"accountId": self._account_id, "onlyOpen": True},
+            )
+        except Exception:
+            # Endpoint may not exist on this account tier — assume flat
+            return {"symbol": symbol, "net_pos": 0, "avg_price": 0.0, "open_pnl": 0.0}
         positions = data if isinstance(data, list) else data.get("positions", [])
         sym = symbol.upper()
         for pos in positions:

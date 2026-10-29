@@ -66,6 +66,7 @@ class Bot:
         self._shutdown = asyncio.Event()
         self._today_levels: DayLevels | None = None
         self._levels_date: str = ""
+        self._flattened_today: bool = False
 
     # ------------------------------------------------------------------
     # Bar handler
@@ -87,9 +88,11 @@ class Bot:
             flush=True,
         )
 
-        # Flatten check
+        # Flatten check — only fire once per day
         if self._risk.should_flatten(bar.timestamp):
-            asyncio.create_task(self._flatten_position())
+            if not self._flattened_today:
+                self._flattened_today = True
+                asyncio.create_task(self._flatten_position())
             return
 
         # Session check
@@ -195,6 +198,7 @@ class Bot:
         # The opening range fills in after 9:45 ET from the first bars.
         import pandas as _pd
         self._today_levels = DayLevels(date=_pd.Timestamp(bar.timestamp).normalize())
+        self._flattened_today = False
         logger.info("New trading day %s — levels reset, waiting for opening range", day_str)
 
     async def _flatten_position(self) -> None:

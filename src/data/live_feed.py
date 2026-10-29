@@ -51,7 +51,7 @@ class _BarAccumulator:
     volume: float = 0.0
 
     def update(self, price: float, size: float = 0.0) -> None:
-        if self.bar_open_ts == 0.0:
+        if self.open == 0.0:
             self.open = price
             self.high = price
             self.low = price
