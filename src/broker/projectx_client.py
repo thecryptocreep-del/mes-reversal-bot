@@ -234,16 +234,16 @@ class ProjectXClient:
             direction, symbol, qty, contract_id, entry_price, stop_price, target_price,
         )
 
-        # Entry limit order
+        # Entry market order — fills immediately at bar4 open
         entry_body = {
             "accountId": self._account_id,
             "contractId": contract_id,
-            "type": ORDER_TYPE_LIMIT,
+            "type": ORDER_TYPE_MARKET,
             "side": side,
             "size": qty,
-            "limitPrice": entry_price,
         }
         result = await self._post("/Order/place", entry_body)
+        logger.info("Entry order response: %s", result)
         if not result.get("success", True) and result.get("errorCode"):
             raise RuntimeError(f"Entry order failed: {result}")
         order_id = result.get("orderId") or result.get("id")
