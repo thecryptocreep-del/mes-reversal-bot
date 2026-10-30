@@ -17,13 +17,14 @@ import signal
 import sys
 from datetime import datetime, timezone
 
-from config.risk import MAX_POSITION_CONTRACTS, STOP_POINTS, TARGET_POINTS, MIN_BAR2_EXTENSION_POINTS
+from config.risk import MAX_POSITION_CONTRACTS, MAX_POSITION_CONTRACTS_APLUS, STOP_POINTS, TARGET_POINTS, MIN_BAR2_EXTENSION_POINTS
 from config.settings import LIVE_MODE, SYMBOL
 from src.bot.jev_logger import JevLogger
 from src.bot.risk_manager import RiskManager
 from src.bot.signal_engine import SignalEngine
 from src.data.live_feed import Bar, LiveFeed
-from src.strategy.key_levels import DayLevels, bar2_at_level
+from src.strategy.key_levels import DayLevels, SignalGrade, grade_signal
+from src.data.prior_day import fetch_prior_day
 from src.bot.notifier import send_signal_alert
 
 # Key levels filter settings (tune via env vars)
@@ -124,19 +125,23 @@ class Bot:
         b1, b2, b3 = bars_deque[0], bars_deque[1], bars_deque[2]
 
         direction = "Buy" if signal == Signal.LONG else "Sell"
+        sig_direction = 1 if signal == Signal.LONG else -1
 
-        # Key levels filter
-        if _USE_KEY_LEVELS:
-            sig_direction = 1 if signal == Signal.LONG else -1
-            if self._today_levels is None or not bar2_at_level(
+        # Grade signal by key level proximity
+        if _USE_KEY_LEVELS and self._today_levels is not None:
+            grade = grade_signal(
                 bar2_high=b2.high,
                 bar2_low=b2.low,
                 signal_direction=sig_direction,
                 levels=self._today_levels,
                 proximity_points=_LEVEL_PROXIMITY,
-            ):
-                logger.info("Signal %s skipped — bar2 not at a key level", signal.name)
-                return
+            )
+        else:
+            grade = SignalGrade.C  # no levels → treat as minimum grade
+
+        qty = MAX_POSITION_CONTRACTS_APLUS if grade == SignalGrade.A_PLUS else MAX_POSITION_CONTRACTS
+        logger.info("Signal grade: %s → %d contract(s)", grade.value, qty)
+
         entry_price = bar.close
         if signal == Signal.LONG:
             stop_price = entry_price - STOP_POINTS
@@ -172,7 +177,7 @@ class Bot:
         )
 
         asyncio.create_task(
-            self._place_order(direction, entry_price, stop_price, target_price)
+            self._place_order(direction, entry_price, stop_price, target_price, qty)
         )
 
     async def _place_order(
@@ -181,12 +186,13 @@ class Bot:
         entry_price: float,
         stop_price: float,
         target_price: float,
+        qty: int = MAX_POSITION_CONTRACTS,
     ) -> None:
         try:
             order_id = await self._client.place_bracket_order(
                 symbol=SYMBOL,
                 direction=direction,
-                qty=MAX_POSITION_CONTRACTS,
+                qty=qty,
                 entry_price=entry_price,
                 stop_price=stop_price,
                 target_price=target_price,
@@ -248,6 +254,17 @@ class Bot:
                 logger.info("Using account ID %s from env", target_id)
             acct = await self._client.get_account_info()
             logger.info("Account: %s  cash=%.2f", acct.get("name"), acct.get("cash", 0))
+
+            # Seed today's levels with prior day data fetched from yfinance
+            pd_levels = fetch_prior_day(SYMBOL)
+            import pandas as _pd2
+            self._today_levels = DayLevels(
+                date=_pd2.Timestamp.now().normalize(),
+                pdh=pd_levels["pdh"],
+                pdl=pd_levels["pdl"],
+                pdc=pd_levels["pdc"],
+            )
+            self._levels_date = datetime.now().strftime("%Y-%m-%d")
 
             # Resolve contractId via REST API (needed for WS subscription)
             try:

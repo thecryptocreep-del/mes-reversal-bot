@@ -16,10 +16,17 @@ within `proximity_points` of any key level.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional
 
 import pandas as pd
 import numpy as np
+
+
+class SignalGrade(Enum):
+    A_PLUS = "A+"   # bar2 within proximity of a key level  → double size
+    B      = "B"    # bar2 within 2× proximity              → normal size
+    C      = "C"    # no key level nearby                   → minimum size
 
 
 # Opening range window: 9:30 – 9:45 ET (first 15 min of RTH)
@@ -113,3 +120,24 @@ def bar2_at_level(
 
     extreme = bar2_low if signal_direction == 1 else bar2_high
     return any(abs(extreme - lvl) <= proximity_points for lvl in key_levels)
+
+
+def grade_signal(
+    bar2_high: float,
+    bar2_low: float,
+    signal_direction: int,
+    levels: DayLevels,
+    proximity_points: float = 10.0,
+) -> SignalGrade:
+    """
+    Grade a signal by how close bar2's extreme is to a key level.
+
+      A+ — within proximity_points   (strong confluence)
+      B  — within 2× proximity_points (moderate confluence)
+      C  — no key level nearby        (pattern only, minimum size)
+    """
+    if bar2_at_level(bar2_high, bar2_low, signal_direction, levels, proximity_points):
+        return SignalGrade.A_PLUS
+    if bar2_at_level(bar2_high, bar2_low, signal_direction, levels, proximity_points * 2):
+        return SignalGrade.B
+    return SignalGrade.C

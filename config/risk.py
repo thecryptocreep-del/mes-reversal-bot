@@ -4,7 +4,8 @@ Changes here require explicit user approval.
 """
 from config.settings import COMMISSION_PER_SIDE, POINT_VALUE, TICK_SIZE
 
-MAX_POSITION_CONTRACTS = 1
+MAX_POSITION_CONTRACTS        = 1  # B / C grade
+MAX_POSITION_CONTRACTS_APLUS  = 2  # A+ grade (at key level)
 DAILY_LOSS_LIMIT_USD   = 150.0
 MAX_TRADES_PER_DAY     = 6
 FLATTEN_TIME_ET        = "15:55"
