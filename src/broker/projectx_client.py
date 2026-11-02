@@ -234,13 +234,21 @@ class ProjectXClient:
             direction, symbol, qty, contract_id, entry_price, stop_price, target_price,
         )
 
-        # Entry market order — fills immediately at bar4 open
+        # Entry as aggressive limit (10 ticks past signal price) — Topstep
+        # rejects pure market orders with "limit price not set"; an aggressive
+        # limit fills immediately at market while satisfying the API requirement.
+        TICK = 0.25
+        if side == SIDE_BUY:
+            aggressive_price = round(entry_price + 10 * TICK, 2)
+        else:
+            aggressive_price = round(entry_price - 10 * TICK, 2)
         entry_body = {
             "accountId": self._account_id,
             "contractId": contract_id,
-            "type": ORDER_TYPE_MARKET,
+            "type": ORDER_TYPE_LIMIT,
             "side": side,
             "size": qty,
+            "limitPrice": aggressive_price,
         }
         result = await self._post("/Order/place", entry_body)
         logger.info("Entry order response: %s", result)
