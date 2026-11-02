@@ -90,13 +90,14 @@ class Bot:
         # Update day levels
         self._update_levels_for_bar(bar)
 
-        # Status line
-        print(
+        # Status line — written to both terminal and log file
+        bar_line = (
             f"[{ts_str}] O={bar.open:.2f} H={bar.high:.2f} "
             f"L={bar.low:.2f} C={bar.close:.2f} V={bar.volume:.0f} | "
-            f"trades={self._risk.trade_count}/{6} pnl=${self._risk.daily_pnl:.2f}",
-            flush=True,
+            f"trades={self._risk.trade_count}/{6} pnl=${self._risk.daily_pnl:.2f}"
         )
+        print(bar_line, flush=True)
+        logger.info(bar_line)
 
         # Flatten check — only fire once per day
         if self._risk.should_flatten(bar.timestamp):

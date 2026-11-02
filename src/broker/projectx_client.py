@@ -250,28 +250,29 @@ class ProjectXClient:
         if order_id is None:
             raise RuntimeError(f"Order placement returned no id: {result}")
 
-        # Stop loss order (opposite side)
-        stop_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
+        # Stop loss + target — opposite side to entry
+        exit_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
         stop_body = {
             "accountId": self._account_id,
             "contractId": contract_id,
             "type": ORDER_TYPE_STOP,
-            "side": stop_side,
+            "side": exit_side,
             "size": qty,
             "stopPrice": stop_price,
         }
-        await self._post("/Order/place", stop_body)
+        stop_result = await self._post("/Order/place", stop_body)
+        logger.info("Stop order response: %s", stop_result)
 
-        # Target limit order (opposite side)
         target_body = {
             "accountId": self._account_id,
             "contractId": contract_id,
             "type": ORDER_TYPE_LIMIT,
-            "side": stop_side,
+            "side": exit_side,
             "size": qty,
             "limitPrice": target_price,
         }
-        await self._post("/Order/place", target_body)
+        target_result = await self._post("/Order/place", target_body)
+        logger.info("Target order response: %s", target_result)
 
         logger.info("Bracket placed: entry orderId=%s", order_id)
         return int(order_id)
