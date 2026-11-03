@@ -258,7 +258,11 @@ class ProjectXClient:
         if order_id is None:
             raise RuntimeError(f"Order placement returned no id: {result}")
 
-        # Stop loss + target — opposite side to entry
+        # Wait briefly for entry to register before placing bracket legs
+        import asyncio as _asyncio
+        await _asyncio.sleep(1.0)
+
+        # Stop loss + target — opposite side to entry, linked to entry order
         exit_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
         stop_body = {
             "accountId": self._account_id,
@@ -267,6 +271,7 @@ class ProjectXClient:
             "side": exit_side,
             "size": qty,
             "stopPrice": stop_price,
+            "limitPrice": stop_price,  # some brokers require both for stop orders
         }
         stop_result = await self._post("/Order/place", stop_body)
         logger.info("Stop order response: %s", stop_result)
