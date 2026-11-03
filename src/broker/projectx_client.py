@@ -34,9 +34,12 @@ _WS_MARKET = "wss://api.topstepx.com/hubs/market"
 TOKEN_TTL_SECONDS = 23 * 3600  # re-auth before 24h expiry
 
 # Order type and side codes per Topstep API
-ORDER_TYPE_MARKET = 1
-ORDER_TYPE_LIMIT  = 2
-ORDER_TYPE_STOP   = 3
+ORDER_TYPE_MARKET     = 1
+ORDER_TYPE_LIMIT      = 2
+ORDER_TYPE_STOP       = 3  # rejected by Topstep — use STOP_LIMIT instead
+ORDER_TYPE_STOP_LIMIT = 4
+
+TICK = 0.25  # MNQ minimum tick size
 
 SIDE_BUY  = 0
 SIDE_SELL = 1
@@ -270,13 +273,20 @@ class ProjectXClient:
         await _asyncio.sleep(1.0)
 
         exit_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
+        # Stop-limit: stopPrice triggers the order; limitPrice = 4 ticks of slippage allowed
+        STOP_SLIPPAGE = 4 * TICK
+        if exit_side == SIDE_SELL:
+            stop_limit_price = round(stop_price - STOP_SLIPPAGE, 2)
+        else:
+            stop_limit_price = round(stop_price + STOP_SLIPPAGE, 2)
         stop_body = {
             "accountId": self._account_id,
             "contractId": contract_id,
-            "type": ORDER_TYPE_LIMIT,
+            "type": ORDER_TYPE_STOP_LIMIT,
             "side": exit_side,
             "size": qty,
-            "limitPrice": stop_price,
+            "stopPrice": stop_price,
+            "limitPrice": stop_limit_price,
         }
         stop_result = await self._post("/Order/place", stop_body)
         logger.info("Stop order response: %s", stop_result)
