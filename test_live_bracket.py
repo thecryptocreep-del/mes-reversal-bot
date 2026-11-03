@@ -112,11 +112,11 @@ async def main():
         stop_id = stop_result.get("orderId")
 
         print(f"\nEntry filled. Stop resting at {stop} (stop-limit).")
-        print(f"Target {target} is software-managed (no exchange order).")
-        print(f"\nWaiting 30s then checking order status...")
-        await asyncio.sleep(30)
+        print(f"Target {target} is software-managed.")
+        print(f"\nWaiting 5s then simulating TP trigger...")
+        await asyncio.sleep(5)
 
-        # Check status
+        # Check stop is still working
         start = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
         orders = (await client._post("/Order/search", {
             "accountId": client._account_id,
@@ -125,22 +125,55 @@ async def main():
 
         STATUS = {1: "Working", 2: "Filled", 3: "Cancelled", 4: "Rejected"}
         TYPE   = {1: "Market", 2: "Limit", 3: "Stop", 4: "StopLimit"}
-        print(f"\n{'ID':<14} {'Type':<10} {'Status':<10} {'StopPx':<10} {'FillPx'}")
-        print("-" * 55)
-        for o in orders:
-            if o.get("id") in [entry_result.get("orderId"), stop_id]:
-                print(f"{o['id']:<14} {TYPE.get(o['type'],'?'):<10} "
-                      f"{STATUS.get(o['status'],'?'):<10} "
-                      f"{o.get('stopPrice') or '-':<10} "
-                      f"{o.get('filledPrice') or '-'}")
 
-        # If stop is still Working, it's resting correctly
+        stop_working = False
         for o in orders:
-            if o.get("id") == stop_id and o.get("status") == 1:
-                print(f"\nSUCCESS — stop order is RESTING on exchange (status=Working)")
-                print(f"Cancelling stop now (test complete)...")
-                await client._post("/Order/cancel", {"orderId": stop_id, "accountId": client._account_id})
-                print("Done.")
-                break
+            if o.get("id") == stop_id:
+                s = STATUS.get(o.get("status"), "?")
+                print(f"Stop status: {s}  stopPx={o.get('stopPrice')}  fillPx={o.get('filledPrice')}")
+                stop_working = (o.get("status") == 1)
+
+        if not stop_working:
+            print("Stop already filled/cancelled — cannot test TP.")
+            return
+
+        print(f"\nSimulating TP: cancelling stop + placing closing SELL at market...")
+
+        # Step 1: cancel stop
+        cancel = await client._post("/Order/cancel", {"orderId": stop_id, "accountId": client._account_id})
+        print(f"Stop cancelled → {cancel}")
+
+        await asyncio.sleep(0.5)
+
+        # Step 2: close position (sell at market)
+        close_result = await client._post("/Order/place", {
+            "accountId": client._account_id,
+            "contractId": cid,
+            "type": ORDER_TYPE_LIMIT,
+            "side": SIDE_SELL,
+            "size": 1,
+            "limitPrice": target,
+        })
+        print(f"Close order  → {close_result}")
+
+        await asyncio.sleep(3)
+
+        # Verify close filled
+        orders2 = (await client._post("/Order/search", {
+            "accountId": client._account_id,
+            "startTimestamp": start,
+        })).get("orders", [])
+
+        for o in orders2:
+            if o.get("id") == close_result.get("orderId"):
+                s = STATUS.get(o.get("status"), "?")
+                fp = o.get("filledPrice") or "-"
+                print(f"\nClose order status: {s}  fillPx={fp}")
+                if o.get("status") == 2:
+                    fill = float(fp)
+                    pnl = (fill - entry) * 2.0  # $2/pt for MNQ
+                    print(f"TP TEST PASSED — entered {entry:.2f} closed {fill:.2f}  PnL≈${pnl:.2f}")
+                else:
+                    print("Close order not filled yet — check Topstep.")
 
 asyncio.run(main())
