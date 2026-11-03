@@ -73,7 +73,10 @@ class Bot:
         self._signal_engine = SignalEngine(min_extension=_MIN_EXTENSION)
         self._jev = JevLogger()
         self._current_order_id: int | None = None
-        self._open_exit_ids: list[int] = []   # stop + target order IDs for OCO cleanup
+        self._open_exit_ids: list[int] = []   # stop order ID(s) to cancel when TP fires
+        self._trade_direction: str | None = None   # "Buy" or "Sell"
+        self._trade_target: float | None = None    # software TP level
+        self._trade_qty: int = 0
         self._shutdown = asyncio.Event()
         self._today_levels: DayLevels | None = None
         self._levels_date: str = ""
@@ -99,6 +102,17 @@ class Bot:
         )
         print(bar_line, flush=True)
         logger.info(bar_line)
+
+        # Software TP check — fire at bar close if price has crossed target
+        if self._trade_target is not None and self._trade_direction is not None:
+            tp_hit = (
+                (self._trade_direction == "Buy"  and bar.high >= self._trade_target) or
+                (self._trade_direction == "Sell" and bar.low  <= self._trade_target)
+            )
+            if tp_hit:
+                logger.info("TP hit: target=%.2f bar H=%.2f L=%.2f — closing position", self._trade_target, bar.high, bar.low)
+                asyncio.create_task(self._close_position_at_tp())
+                return
 
         # Flatten check — only fire once per day
         if self._risk.should_flatten(bar.timestamp):
@@ -200,35 +214,54 @@ class Bot:
                 target_price=target_price,
             )
             self._current_order_id = ids["entry_id"]
-            # Track exit legs so we can cancel the orphan when position closes
-            self._open_exit_ids = [
-                i for i in [ids.get("stop_id"), ids.get("target_id")] if i
-            ]
+            # Only stop leg rests on exchange; TP is software-managed
+            self._open_exit_ids = [i for i in [ids.get("stop_id")] if i]
+            self._trade_direction = direction
+            self._trade_target = target_price
+            self._trade_qty = qty
             self._risk.record_trade(0.0)
-            # Start OCO monitor to cancel orphaned exit order
-            asyncio.create_task(self._oco_monitor())
         except Exception as exc:
             logger.error("Order placement failed: %s", exc)
 
-    async def _oco_monitor(self) -> None:
-        """Poll position every 15s; when flat, cancel the orphaned exit leg."""
-        import asyncio as _asyncio
-        if not self._open_exit_ids:
-            return
-        logger.info("OCO monitor started, watching exit orders %s", self._open_exit_ids)
-        for _ in range(40):  # max 10 minutes
-            await _asyncio.sleep(15)
-            try:
-                pos = await self._client.get_position(SYMBOL)
-                if pos["net_pos"] == 0:
-                    logger.info("Position flat — cancelling orphaned exit orders %s", self._open_exit_ids)
-                    await self._client.cancel_orders(self._open_exit_ids)
-                    self._open_exit_ids = []
-                    return
-            except Exception as exc:
-                logger.debug("OCO monitor poll error: %s", exc)
-        logger.warning("OCO monitor timed out — exit orders %s may be orphaned", self._open_exit_ids)
+    async def _close_position_at_tp(self) -> None:
+        """Software take-profit: cancel the stop order and close position at market."""
+        target = self._trade_target
+        direction = self._trade_direction
+        qty = self._trade_qty
+        stop_ids = list(self._open_exit_ids)
+
+        # Clear state immediately to prevent re-entry
+        self._trade_target = None
+        self._trade_direction = None
+        self._trade_qty = 0
         self._open_exit_ids = []
+
+        try:
+            # Cancel the resting stop order first
+            if stop_ids:
+                logger.info("TP: cancelling stop order(s) %s", stop_ids)
+                await self._client.cancel_orders(stop_ids)
+
+            # Place closing order (market-style limit fills immediately on Topstep)
+            close_direction = "Sell" if direction == "Buy" else "Buy"
+            from src.broker.projectx_client import ORDER_TYPE_LIMIT, SIDE_BUY, SIDE_SELL, _BASE
+            from config.settings import SYMBOL as _SYM
+            exit_side = SIDE_SELL if close_direction == "Sell" else SIDE_BUY
+            contract_id = await self._client.get_contract_id(_SYM)
+            body = {
+                "accountId": self._client._account_id,
+                "contractId": contract_id,
+                "type": ORDER_TYPE_LIMIT,
+                "side": exit_side,
+                "size": qty,
+                "limitPrice": target,
+            }
+            result = await self._client._post("/Order/place", body)
+            logger.info("TP close order: %s → %s", close_direction, result)
+            pnl = TARGET_POINTS * qty * 2.0  # approximate MNQ point value
+            self._risk.record_trade(pnl)
+        except Exception as exc:
+            logger.error("TP close failed: %s", exc)
 
     def _update_levels_for_bar(self, bar: Bar) -> None:
         """Refresh today's DayLevels when the date changes."""

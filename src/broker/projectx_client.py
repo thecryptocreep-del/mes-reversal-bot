@@ -292,20 +292,10 @@ class ProjectXClient:
         logger.info("Stop order response: %s", stop_result)
         stop_id = stop_result.get("orderId")
 
-        target_body = {
-            "accountId": self._account_id,
-            "contractId": contract_id,
-            "type": ORDER_TYPE_LIMIT,
-            "side": exit_side,
-            "size": qty,
-            "limitPrice": target_price,
-        }
-        target_result = await self._post("/Order/place", target_body)
-        logger.info("Target order response: %s", target_result)
-        target_id = target_result.get("orderId")
-
-        logger.info("Bracket placed: entry=%s stop=%s target=%s", order_id, stop_id, target_id)
-        return {"entry_id": int(order_id), "stop_id": stop_id, "target_id": target_id}
+        # Target is managed in software (bot monitors price and closes position)
+        # Topstep rejects limit orders above/below market as resting orders
+        logger.info("Bracket placed: entry=%s stop=%s (TP managed in software)", order_id, stop_id)
+        return {"entry_id": int(order_id), "stop_id": stop_id, "target_id": None}
 
     async def cancel_order(self, order_id: int) -> None:
         """Cancel an open order."""
