@@ -150,12 +150,33 @@ class ProjectXClient:
     # ------------------------------------------------------------------
 
     async def get_account_info(self) -> dict[str, Any]:
-        """Return first active account details and cache its ID."""
+        """Return active account details and cache its ID.
+
+        If PROJECTX_ACCOUNT_ID env var is set, that specific account is used.
+        Otherwise the first active account is selected (log a warning if multiple exist).
+        """
         data = await self._post("/Account/search", {"onlyActiveAccounts": True})
         accounts = data if isinstance(data, list) else data.get("accounts", [])
         if not accounts:
             raise RuntimeError("No active ProjectX/Topstep accounts found")
-        acct = accounts[0]
+
+        forced_id = os.getenv("PROJECTX_ACCOUNT_ID")
+        if forced_id:
+            match = [a for a in accounts if str(a.get("id") or a.get("accountId")) == forced_id]
+            if not match:
+                ids = [str(a.get("id") or a.get("accountId")) for a in accounts]
+                raise RuntimeError(
+                    f"PROJECTX_ACCOUNT_ID={forced_id} not found. Available: {ids}"
+                )
+            acct = match[0]
+            logger.info("Using pinned account ID=%s", forced_id)
+        else:
+            if len(accounts) > 1:
+                ids = [(a.get("id") or a.get("accountId"), a.get("name", "")) for a in accounts]
+                logger.warning(
+                    "Multiple accounts found — using first. Set PROJECTX_ACCOUNT_ID to pin one. Accounts: %s", ids
+                )
+            acct = accounts[0]
         self._account_id = acct.get("id") or acct.get("accountId")
         return {
             "account_id": self._account_id,

@@ -1,63 +1,25 @@
 """
-Check recent orders and positions on the account.
+List ALL accounts on this API key so we can find the right one.
     python check_orders.py
 """
 import asyncio
 
 async def main():
-    from src.broker.projectx_client import ProjectXClient
+    from src.broker.projectx_client import ProjectXClient, _BASE
 
     async with ProjectXClient() as client:
-        acct = await client.get_account_info()
-        print(f"Account ID : {client._account_id}")
-        print(f"Account    : {acct['name']}")
-        print(f"Cash       : ${acct['cash']:.2f}\n")
+        # List ALL accounts
+        data = await client._post("/Account/search", {"onlyActiveAccounts": True})
+        accounts = data if isinstance(data, list) else data.get("accounts", [])
 
-        # Search open orders
-        print("--- Open Orders ---")
-        try:
-            result = await client._post("/Order/search", {
-                "accountId": client._account_id,
-                "status": 1,  # open/working
-            })
-            orders = result if isinstance(result, list) else result.get("orders", result)
-            if not orders:
-                print("  (none)")
-            else:
-                for o in orders:
-                    print(f"  {o}")
-        except Exception as e:
-            print(f"  Error: {e}")
+        print(f"Found {len(accounts)} account(s):\n")
+        for i, a in enumerate(accounts):
+            acct_id = a.get("id") or a.get("accountId")
+            name    = a.get("name") or a.get("accountName", "")
+            balance = a.get("balance") or a.get("cashBalance", 0)
+            print(f"  [{i}] ID={acct_id}  name={name}  balance=${float(balance):.2f}")
 
-        # Search all recent orders (no status filter)
-        print("\n--- All Recent Orders ---")
-        try:
-            result = await client._post("/Order/search", {
-                "accountId": client._account_id,
-            })
-            orders = result if isinstance(result, list) else result.get("orders", result)
-            if not orders:
-                print("  (none)")
-            else:
-                for o in (orders[:10] if isinstance(orders, list) else [orders]):
-                    print(f"  {o}")
-        except Exception as e:
-            print(f"  Error (no filter): {e}")
-
-        # Positions
-        print("\n--- Open Positions ---")
-        try:
-            result = await client._post("/Position/search", {
-                "accountId": client._account_id,
-                "onlyOpen": True,
-            })
-            positions = result if isinstance(result, list) else result.get("positions", result)
-            if not positions:
-                print("  (flat)")
-            else:
-                for p in positions:
-                    print(f"  {p}")
-        except Exception as e:
-            print(f"  Error: {e}")
+        print()
+        print("Set PROJECTX_ACCOUNT_ID=<id> in your .env to force a specific account.")
 
 asyncio.run(main())
