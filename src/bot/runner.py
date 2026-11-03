@@ -73,6 +73,7 @@ class Bot:
         self._signal_engine = SignalEngine(min_extension=_MIN_EXTENSION)
         self._jev = JevLogger()
         self._current_order_id: int | None = None
+        self._open_exit_ids: list[int] = []   # stop + target order IDs for OCO cleanup
         self._shutdown = asyncio.Event()
         self._today_levels: DayLevels | None = None
         self._levels_date: str = ""
@@ -190,7 +191,7 @@ class Bot:
         qty: int = MAX_POSITION_CONTRACTS,
     ) -> None:
         try:
-            order_id = await self._client.place_bracket_order(
+            ids = await self._client.place_bracket_order(
                 symbol=SYMBOL,
                 direction=direction,
                 qty=qty,
@@ -198,10 +199,36 @@ class Bot:
                 stop_price=stop_price,
                 target_price=target_price,
             )
-            self._current_order_id = order_id
-            self._risk.record_trade(0.0)  # P&L updated when position closes
+            self._current_order_id = ids["entry_id"]
+            # Track exit legs so we can cancel the orphan when position closes
+            self._open_exit_ids = [
+                i for i in [ids.get("stop_id"), ids.get("target_id")] if i
+            ]
+            self._risk.record_trade(0.0)
+            # Start OCO monitor to cancel orphaned exit order
+            asyncio.create_task(self._oco_monitor())
         except Exception as exc:
             logger.error("Order placement failed: %s", exc)
+
+    async def _oco_monitor(self) -> None:
+        """Poll position every 15s; when flat, cancel the orphaned exit leg."""
+        import asyncio as _asyncio
+        if not self._open_exit_ids:
+            return
+        logger.info("OCO monitor started, watching exit orders %s", self._open_exit_ids)
+        for _ in range(40):  # max 10 minutes
+            await _asyncio.sleep(15)
+            try:
+                pos = await self._client.get_position(SYMBOL)
+                if pos["net_pos"] == 0:
+                    logger.info("Position flat — cancelling orphaned exit orders %s", self._open_exit_ids)
+                    await self._client.cancel_orders(self._open_exit_ids)
+                    self._open_exit_ids = []
+                    return
+            except Exception as exc:
+                logger.debug("OCO monitor poll error: %s", exc)
+        logger.warning("OCO monitor timed out — exit orders %s may be orphaned", self._open_exit_ids)
+        self._open_exit_ids = []
 
     def _update_levels_for_bar(self, bar: Bar) -> None:
         """Refresh today's DayLevels when the date changes."""
@@ -219,11 +246,14 @@ class Bot:
 
     async def _flatten_position(self) -> None:
         logger.info("Flatten time reached — closing any open position")
+        # Cancel open exit legs first to avoid runaway orders
+        if self._open_exit_ids:
+            await self._client.cancel_orders(self._open_exit_ids)
+            self._open_exit_ids = []
         try:
             pos = await self._client.get_position(SYMBOL)
             if pos["net_pos"] != 0:
                 direction = "Sell" if pos["net_pos"] > 0 else "Buy"
-                # Market order to flatten: use current price as both stop and target
                 await self._client.place_bracket_order(
                     symbol=SYMBOL,
                     direction=direction,

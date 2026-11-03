@@ -226,20 +226,14 @@ class ProjectXClient:
         entry_price: float,
         stop_price: float,
         target_price: float,
-    ) -> int:
+    ) -> dict[str, Any]:
         """
         Place entry limit order + stop + target as separate orders.
 
-        Args:
-            symbol:       e.g. "MNQ"
-            direction:    "Buy" or "Sell"
-            qty:          number of contracts
-            entry_price:  limit entry price
-            stop_price:   stop-loss price
-            target_price: take-profit price
+        Topstep has no native OCO — caller should use cancel_open_orders_for_contract()
+        after the position closes to clean up the orphaned leg.
 
-        Returns:
-            orderId of the entry leg
+        Returns dict with keys: entry_id, stop_id, target_id
         """
         if LIVE_MODE:
             logger.warning("LIVE_MODE active — placing REAL order on Topstep!")
@@ -255,18 +249,15 @@ class ProjectXClient:
             direction, symbol, qty, contract_id, entry_price, stop_price, target_price,
         )
 
-        TICK = 0.25
-        if side == SIDE_BUY:
-            aggressive_price = round(entry_price + 10 * TICK, 2)
-        else:
-            aggressive_price = round(entry_price - 10 * TICK, 2)
+        import asyncio as _asyncio
+
         entry_body = {
             "accountId": self._account_id,
             "contractId": contract_id,
             "type": ORDER_TYPE_LIMIT,
             "side": side,
             "size": qty,
-            "limitPrice": aggressive_price,
+            "limitPrice": entry_price,
         }
         result = await self._post("/Order/place", entry_body)
         logger.info("Entry order response: %s", result)
@@ -276,13 +267,9 @@ class ProjectXClient:
         if order_id is None:
             raise RuntimeError(f"Order placement returned no id: {result}")
 
-        # Wait briefly for entry to register before placing bracket legs
-        import asyncio as _asyncio
         await _asyncio.sleep(1.0)
 
-        # Stop loss + target — opposite side to entry, linked to entry order
         exit_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
-        # Topstep API rejects ORDER_TYPE_STOP — use limit order at stop price
         stop_body = {
             "accountId": self._account_id,
             "contractId": contract_id,
@@ -293,6 +280,7 @@ class ProjectXClient:
         }
         stop_result = await self._post("/Order/place", stop_body)
         logger.info("Stop order response: %s", stop_result)
+        stop_id = stop_result.get("orderId")
 
         target_body = {
             "accountId": self._account_id,
@@ -304,14 +292,27 @@ class ProjectXClient:
         }
         target_result = await self._post("/Order/place", target_body)
         logger.info("Target order response: %s", target_result)
+        target_id = target_result.get("orderId")
 
-        logger.info("Bracket placed: entry orderId=%s", order_id)
-        return int(order_id)
+        logger.info("Bracket placed: entry=%s stop=%s target=%s", order_id, stop_id, target_id)
+        return {"entry_id": int(order_id), "stop_id": stop_id, "target_id": target_id}
 
     async def cancel_order(self, order_id: int) -> None:
         """Cancel an open order."""
         result = await self._post("/Order/cancel", {"orderId": order_id, "accountId": self._account_id})
         logger.info("Order %s cancelled: %s", order_id, result)
+
+    async def cancel_orders(self, order_ids: list[int]) -> None:
+        """Cancel multiple orders, ignoring errors on already-filled ones."""
+        import asyncio as _asyncio
+        for oid in order_ids:
+            if oid is None:
+                continue
+            try:
+                await self.cancel_order(int(oid))
+            except Exception as exc:
+                logger.debug("Cancel %s skipped: %s", oid, exc)
+            await _asyncio.sleep(0.2)
 
     # ------------------------------------------------------------------
     # Positions
