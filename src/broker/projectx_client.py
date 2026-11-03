@@ -234,9 +234,6 @@ class ProjectXClient:
             direction, symbol, qty, contract_id, entry_price, stop_price, target_price,
         )
 
-        # Entry as aggressive limit (10 ticks past signal price) — Topstep
-        # rejects pure market orders with "limit price not set"; an aggressive
-        # limit fills immediately at market while satisfying the API requirement.
         TICK = 0.25
         if side == SIDE_BUY:
             aggressive_price = round(entry_price + 10 * TICK, 2)
@@ -271,7 +268,7 @@ class ProjectXClient:
             "side": exit_side,
             "size": qty,
             "stopPrice": stop_price,
-            "limitPrice": stop_price,  # some brokers require both for stop orders
+            "limitPrice": stop_price,
         }
         stop_result = await self._post("/Order/place", stop_body)
         logger.info("Stop order response: %s", stop_result)
