@@ -12,8 +12,8 @@ if os.getenv("LIVE_MODE", "0") == "1":
     print("ERROR: LIVE_MODE=1 — refusing to run test on live account.")
     sys.exit(1)
 
-SL_POINTS = 12.0
-TP_POINTS = 12.0
+SL_POINTS = 6.0
+TP_POINTS = 6.0
 
 async def get_last_price(client, contract_id, timeout=20.0):
     import aiohttp, json
