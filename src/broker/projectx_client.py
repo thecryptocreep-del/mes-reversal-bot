@@ -38,8 +38,8 @@ ORDER_TYPE_MARKET = 1
 ORDER_TYPE_LIMIT  = 2
 ORDER_TYPE_STOP   = 3
 
-SIDE_BUY  = 1
-SIDE_SELL = 2
+SIDE_BUY  = 0
+SIDE_SELL = 1
 
 
 @dataclass
@@ -261,13 +261,13 @@ class ProjectXClient:
 
         # Stop loss + target — opposite side to entry, linked to entry order
         exit_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
+        # Topstep API rejects ORDER_TYPE_STOP — use limit order at stop price
         stop_body = {
             "accountId": self._account_id,
             "contractId": contract_id,
-            "type": ORDER_TYPE_STOP,
+            "type": ORDER_TYPE_LIMIT,
             "side": exit_side,
             "size": qty,
-            "stopPrice": stop_price,
             "limitPrice": stop_price,
         }
         stop_result = await self._post("/Order/place", stop_body)
