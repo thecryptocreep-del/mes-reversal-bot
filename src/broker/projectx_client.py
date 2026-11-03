@@ -287,7 +287,7 @@ class ProjectXClient:
 
     async def cancel_order(self, order_id: int) -> None:
         """Cancel an open order."""
-        result = await self._post("/Order/cancel", {"orderId": order_id})
+        result = await self._post("/Order/cancel", {"orderId": order_id, "accountId": self._account_id})
         logger.info("Order %s cancelled: %s", order_id, result)
 
     # ------------------------------------------------------------------
