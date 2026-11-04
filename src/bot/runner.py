@@ -162,6 +162,10 @@ class Bot:
         if not self._risk.can_trade():
             return
 
+        # Already in a position — do not layer trades
+        if self._trade_target is not None:
+            return
+
         # Push bar to deque
         self._signal_engine.push_bar(bar)
         if self._signal_engine.bar_count < 2:
@@ -286,7 +290,6 @@ class Bot:
             self._trade_direction = direction
             self._trade_target = target_price
             self._trade_qty = qty
-            self._risk.record_trade(0.0)
         except Exception as exc:
             logger.error("Order placement failed: %s", exc)
 
@@ -304,21 +307,43 @@ class Bot:
         self._open_exit_ids   = []
 
         try:
+            stop_cancel_ok = True
             if stop_ids:
                 logger.info("TP: cancelling stop order(s) %s", stop_ids)
-                await self._client.cancel_orders(stop_ids)
+                cancel_results = await self._client.cancel_orders(stop_ids)
+                # errorCode 5 = order not found / already executed (stop may have hit)
+                if any(r.get("errorCode", 0) != 0 for r in cancel_results):
+                    stop_cancel_ok = False
+                    logger.warning(
+                        "Stop cancel returned error — verifying position before TP close: %s",
+                        cancel_results,
+                    )
+
+            if not stop_cancel_ok:
+                # Stop may have already filled — check actual net position
+                try:
+                    pos = await self._client.get_position(SYMBOL)
+                    if pos.get("net_pos", 0) == 0:
+                        logger.warning(
+                            "Position already flat — stop executed before TP detection; "
+                            "recording as stop-loss (pnl=%.2f)",
+                            -STOP_POINTS * qty * 2.0,
+                        )
+                        self._risk.record_trade(-STOP_POINTS * qty * 2.0)
+                        return
+                except Exception as exc:
+                    logger.error("Could not verify position after cancel error: %s", exc)
 
             close_direction = "Sell" if direction == "Buy" else "Buy"
-            from src.broker.projectx_client import ORDER_TYPE_LIMIT, SIDE_BUY, SIDE_SELL
-            exit_side  = SIDE_SELL if close_direction == "Sell" else SIDE_BUY
+            from src.broker.projectx_client import ORDER_TYPE_MARKET, SIDE_BUY, SIDE_SELL
+            exit_side = SIDE_SELL if close_direction == "Sell" else SIDE_BUY
             contract_id = await self._client.get_contract_id(SYMBOL)
             body = {
                 "accountId": self._client._account_id,
                 "contractId": contract_id,
-                "type": ORDER_TYPE_LIMIT,
+                "type": ORDER_TYPE_MARKET,
                 "side": exit_side,
                 "size": qty,
-                "limitPrice": target,
             }
             result = await self._client._post("/Order/place", body)
             logger.info("TP close order: %s → %s", close_direction, result)
@@ -354,13 +379,10 @@ class Bot:
             pos = await self._client.get_position(SYMBOL)
             if pos["net_pos"] != 0:
                 direction = "Sell" if pos["net_pos"] > 0 else "Buy"
-                await self._client.place_bracket_order(
+                await self._client.place_market_close(
                     symbol=SYMBOL,
                     direction=direction,
                     qty=abs(pos["net_pos"]),
-                    entry_price=pos["avg_price"],
-                    stop_price=pos["avg_price"],
-                    target_price=pos["avg_price"],
                 )
         except Exception as exc:
             logger.error("Flatten error: %s", exc)

@@ -297,22 +297,44 @@ class ProjectXClient:
         logger.info("Bracket placed: entry=%s stop=%s (TP managed in software)", order_id, stop_id)
         return {"entry_id": int(order_id), "stop_id": stop_id, "target_id": None}
 
-    async def cancel_order(self, order_id: int) -> None:
-        """Cancel an open order."""
+    async def cancel_order(self, order_id: int) -> dict[str, Any]:
+        """Cancel an open order. Returns the API response dict."""
         result = await self._post("/Order/cancel", {"orderId": order_id, "accountId": self._account_id})
         logger.info("Order %s cancelled: %s", order_id, result)
+        return result if isinstance(result, dict) else {}
 
-    async def cancel_orders(self, order_ids: list[int]) -> None:
-        """Cancel multiple orders, ignoring errors on already-filled ones."""
+    async def cancel_orders(self, order_ids: list[int]) -> list[dict[str, Any]]:
+        """Cancel multiple orders. Returns list of API response dicts (one per id)."""
         import asyncio as _asyncio
+        results: list[dict[str, Any]] = []
         for oid in order_ids:
             if oid is None:
                 continue
             try:
-                await self.cancel_order(int(oid))
+                r = await self.cancel_order(int(oid))
+                results.append(r)
             except Exception as exc:
                 logger.debug("Cancel %s skipped: %s", oid, exc)
+                results.append({"errorCode": -1, "errorMessage": str(exc)})
             await _asyncio.sleep(0.2)
+        return results
+
+    async def place_market_close(self, symbol: str, direction: str, qty: int) -> dict[str, Any]:
+        """Place a market order to close (flatten) a position."""
+        if self._account_id is None:
+            await self.get_account_info()
+        contract_id = await self.get_contract_id(symbol)
+        side = SIDE_BUY if direction.lower() == "buy" else SIDE_SELL
+        body = {
+            "accountId": self._account_id,
+            "contractId": contract_id,
+            "type": ORDER_TYPE_MARKET,
+            "side": side,
+            "size": qty,
+        }
+        result = await self._post("/Order/place", body)
+        logger.info("Market close %s x%d: %s", direction, qty, result)
+        return result
 
     # ------------------------------------------------------------------
     # Positions
