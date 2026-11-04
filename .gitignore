@@ -12,6 +12,7 @@ data/raw/
 data/processed/
 data/jev_shadow.jsonl
 data/logs/
+logs/
 *.csv
 !tests/fixtures/*.csv
 .pytest_cache/
