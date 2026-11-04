@@ -16,8 +16,8 @@ def _parse_hhmm(val: str) -> tuple:
     h, m = val.split(":")
     return (int(h), int(m))
 
-SESSION_START_ET = _parse_hhmm(_os.getenv("SESSION_START", "09:00"))
-SESSION_END_ET   = _parse_hhmm(_os.getenv("SESSION_END",   "11:50"))
+SESSION_START_ET = _parse_hhmm(_os.getenv("SESSION_START", "00:00"))
+SESSION_END_ET   = _parse_hhmm(_os.getenv("SESSION_END",   "23:59"))
 
 # Stop and target in points — derived from 55-day MNQ market structure analysis
 # Stop  = 1 ATR (40pts covers 90th pct MAE at 1 bar)
