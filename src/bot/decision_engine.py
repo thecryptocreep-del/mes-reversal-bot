@@ -1,15 +1,12 @@
 """
 Decision engine: selects the entry mode based on time of day and signal grade.
 
-Aggressive window (9:00–11:30 AM ET):
+Aggressive window (9:00–11:50 AM ET, full session):
   A+ grade → ANTICIPATION  (enter at bar2 close — earliest, hammer/shooting star)
   B / C    → AGGRESSIVE    (enter at bar3 open  — two-bar reversal)
 
-Outside aggressive window:
-  Any grade → STANDARD     (enter at bar4 open  — three-bar reversal)
-
 Override the aggressive window via env vars:
-  AGGRESSIVE_START=09:00   AGGRESSIVE_END=11:30
+  AGGRESSIVE_START=09:00   AGGRESSIVE_END=11:50
 """
 from __future__ import annotations
 
@@ -27,7 +24,7 @@ def _parse_hhmm(s: str) -> time:
 
 
 _AGG_START = _parse_hhmm(os.getenv("AGGRESSIVE_START", "09:00"))
-_AGG_END   = _parse_hhmm(os.getenv("AGGRESSIVE_END",   "11:30"))
+_AGG_END   = _parse_hhmm(os.getenv("AGGRESSIVE_END",   "11:50"))
 
 
 class EntryMode(Enum):
