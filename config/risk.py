@@ -25,8 +25,11 @@ SESSION_END_ET   = _parse_hhmm(_os.getenv("SESSION_END",   "11:50"))
 STOP_POINTS   = 40.0
 TARGET_POINTS = 60.0
 
-# Minimum bar2 extension beyond bar1 extreme — filters noise setups
+# Minimum bar2 extension beyond bar1 extreme — filters noise setups (standard + anticipation)
 MIN_BAR2_EXTENSION_POINTS = 5.0
+
+# Minimum bar1 body size for two-bar aggressive pattern — ensures bar1 is a real push
+MIN_BAR1_BODY_POINTS = float(_os.getenv("MIN_BAR1_BODY", "10.0"))
 
 MES_POINT_VALUE        = POINT_VALUE  # backwards compat alias
 SLIPPAGE_POINTS_PER_SIDE = TICK_SIZE  # 1 tick slippage per side

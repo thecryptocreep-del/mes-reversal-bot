@@ -1,10 +1,15 @@
 """
-Main bot loop for the MES/MNQ three-bar reversal bot.
+Main bot loop for the MES/MNQ reversal bot.
 
 PAPER ACCOUNT ONLY unless LIVE_MODE=1 env var is explicitly set.
 
+Three entry modes selected by decision engine:
+  STANDARD     (11:30 AM – close)  — 3-bar reversal, enter bar4 open
+  AGGRESSIVE   (9–11:30 AM, B/C)  — 2-bar reversal, enter bar3 open
+  ANTICIPATION (9–11:30 AM, A+ )  — hammer pattern, enter at bar2 close
+
 Usage:
-    python -m src.bot.runner
+    python main.py
 
 Ctrl+C for graceful shutdown.
 """
@@ -16,9 +21,18 @@ import os
 import signal
 import sys
 from datetime import datetime, timezone
+from typing import Optional
 
-from config.risk import MAX_POSITION_CONTRACTS, MAX_POSITION_CONTRACTS_APLUS, STOP_POINTS, TARGET_POINTS, MIN_BAR2_EXTENSION_POINTS
+from config.risk import (
+    MAX_POSITION_CONTRACTS,
+    MAX_POSITION_CONTRACTS_APLUS,
+    STOP_POINTS,
+    TARGET_POINTS,
+    MIN_BAR2_EXTENSION_POINTS,
+    MIN_BAR1_BODY_POINTS,
+)
 from config.settings import LIVE_MODE, SYMBOL
+from src.bot.decision_engine import EntryMode, in_aggressive_window
 from src.bot.jev_logger import JevLogger
 from src.bot.risk_manager import RiskManager
 from src.bot.signal_engine import SignalEngine
@@ -26,11 +40,13 @@ from src.data.live_feed import Bar, LiveFeed
 from src.strategy.key_levels import DayLevels, SignalGrade, grade_signal
 from src.data.prior_day import fetch_prior_day
 from src.bot.notifier import send_signal_alert
+from src.strategy.three_bar_reversal import Signal
 
 # Key levels filter settings (tune via env vars)
-_USE_KEY_LEVELS = os.getenv("USE_KEY_LEVELS", "1") == "1"
+_USE_KEY_LEVELS  = os.getenv("USE_KEY_LEVELS", "1") == "1"
 _LEVEL_PROXIMITY = float(os.getenv("LEVEL_PROXIMITY", "20.0"))
-_MIN_EXTENSION = float(os.getenv("MIN_EXTENSION", str(MIN_BAR2_EXTENSION_POINTS)))
+_MIN_EXTENSION   = float(os.getenv("MIN_EXTENSION", str(MIN_BAR2_EXTENSION_POINTS)))
+_MIN_BAR1_BODY   = float(os.getenv("MIN_BAR1_BODY", str(MIN_BAR1_BODY_POINTS)))
 
 # Broker selection: BROKER=projectx (default) or BROKER=tradovate
 _BROKER = os.getenv("BROKER", "projectx").lower()
@@ -38,7 +54,6 @@ if _BROKER == "tradovate":
     from src.broker.tradovate_client import TradovateClient as _BrokerClient  # type: ignore[assignment]
 else:
     from src.broker.projectx_client import ProjectXClient as _BrokerClient  # type: ignore[assignment]
-from src.strategy.three_bar_reversal import Signal
 
 import pathlib as _pathlib
 _log_dir = _pathlib.Path("logs")
@@ -65,22 +80,41 @@ else:
 
 
 class Bot:
-    """Orchestrates the live trading loop."""
+    """Orchestrates the live trading loop with multi-mode decision engine."""
 
     def __init__(self) -> None:
         self._client = _BrokerClient()
         self._risk = RiskManager()
-        self._signal_engine = SignalEngine(min_extension=_MIN_EXTENSION)
+        self._signal_engine = SignalEngine(
+            min_extension=_MIN_EXTENSION,
+            min_bar1_body=_MIN_BAR1_BODY,
+        )
         self._jev = JevLogger()
-        self._current_order_id: int | None = None
-        self._open_exit_ids: list[int] = []   # stop order ID(s) to cancel when TP fires
-        self._trade_direction: str | None = None   # "Buy" or "Sell"
-        self._trade_target: float | None = None    # software TP level
+        self._current_order_id: Optional[int] = None
+        self._open_exit_ids: list[int] = []
+        self._trade_direction: Optional[str] = None
+        self._trade_target: Optional[float] = None
         self._trade_qty: int = 0
         self._shutdown = asyncio.Event()
-        self._today_levels: DayLevels | None = None
+        self._today_levels: Optional[DayLevels] = None
         self._levels_date: str = ""
         self._flattened_today: bool = False
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _grade_bar(self, bar, sig_direction: int) -> SignalGrade:
+        """Grade a signal by checking bar's extreme against today's key levels."""
+        if _USE_KEY_LEVELS and self._today_levels is not None:
+            return grade_signal(
+                bar2_high=bar.high,
+                bar2_low=bar.low,
+                signal_direction=sig_direction,
+                levels=self._today_levels,
+                proximity_points=_LEVEL_PROXIMITY,
+            )
+        return SignalGrade.C
 
     # ------------------------------------------------------------------
     # Bar handler
@@ -88,13 +122,9 @@ class Bot:
 
     def _on_bar(self, bar: Bar) -> None:
         """Called when each 5-min bar closes. Runs synchronously in the event loop."""
-        now_et = datetime.now()
         ts_str = bar.timestamp.strftime("%Y-%m-%d %H:%M")
-
-        # Update day levels
         self._update_levels_for_bar(bar)
 
-        # Status line — written to both terminal and log file
         bar_line = (
             f"[{ts_str}] O={bar.open:.2f} H={bar.high:.2f} "
             f"L={bar.low:.2f} C={bar.close:.2f} V={bar.volume:.0f} | "
@@ -103,18 +133,21 @@ class Bot:
         print(bar_line, flush=True)
         logger.info(bar_line)
 
-        # Software TP check — fire at bar close if price has crossed target
+        # Software TP check — fire at bar close if price crossed target
         if self._trade_target is not None and self._trade_direction is not None:
             tp_hit = (
                 (self._trade_direction == "Buy"  and bar.high >= self._trade_target) or
                 (self._trade_direction == "Sell" and bar.low  <= self._trade_target)
             )
             if tp_hit:
-                logger.info("TP hit: target=%.2f bar H=%.2f L=%.2f — closing position", self._trade_target, bar.high, bar.low)
+                logger.info(
+                    "TP hit: target=%.2f bar H=%.2f L=%.2f — closing position",
+                    self._trade_target, bar.high, bar.low,
+                )
                 asyncio.create_task(self._close_position_at_tp())
                 return
 
-        # Flatten check — only fire once per day
+        # Flatten check — only once per day
         if self._risk.should_flatten(bar.timestamp):
             if not self._flattened_today:
                 self._flattened_today = True
@@ -129,41 +162,74 @@ class Bot:
         if not self._risk.can_trade():
             return
 
-        # Signal evaluation
-        signal = self._signal_engine.on_bar(bar)
-        if signal is None or signal == Signal.NONE:
+        # Push bar to deque
+        self._signal_engine.push_bar(bar)
+        if self._signal_engine.bar_count < 2:
             return
 
-        # Have a signal — get the last 3 bars from deque
-        bars_deque = self._signal_engine._bars
-        if len(bars_deque) < 3:
-            return
-        b1, b2, b3 = bars_deque[0], bars_deque[1], bars_deque[2]
+        # --- DECISION ENGINE ---
+        in_agg = in_aggressive_window(bar.timestamp)
+        signal = Signal.NONE
+        mode = EntryMode.STANDARD
+        b1 = b2 = b3 = None
+        grade = SignalGrade.C
 
+        if in_agg:
+            bars = self._signal_engine._bars
+
+            # Priority 1: Anticipation — requires A+ grade
+            ant_sig = self._signal_engine.check_anticipation()
+            if ant_sig != Signal.NONE:
+                _b1, _b2 = bars[-2], bars[-1]
+                sig_dir = 1 if ant_sig == Signal.LONG else -1
+                g = self._grade_bar(_b2, sig_dir)
+                if g == SignalGrade.A_PLUS:
+                    signal, mode, grade = ant_sig, EntryMode.ANTICIPATION, g
+                    b1, b2 = _b1, _b2
+
+            # Priority 2: Aggressive two-bar — any grade
+            if signal == Signal.NONE:
+                agg_sig = self._signal_engine.check_aggressive()
+                if agg_sig != Signal.NONE:
+                    _b1, _b2 = bars[-2], bars[-1]
+                    sig_dir = 1 if agg_sig == Signal.LONG else -1
+                    # Extension bar is bar1 (the big push) — grade by its extreme
+                    g = self._grade_bar(_b1, sig_dir)
+                    signal, mode, grade = agg_sig, EntryMode.AGGRESSIVE, g
+                    b1, b2 = _b1, _b2
+
+        else:
+            # Standard three-bar — outside aggressive window
+            if self._signal_engine.bar_count < 3:
+                return
+            std_sig = self._signal_engine.check_standard()
+            if std_sig is not None and std_sig != Signal.NONE:
+                bars = self._signal_engine._bars
+                _b1, _b2, _b3 = bars[0], bars[1], bars[2]
+                sig_dir = 1 if std_sig == Signal.LONG else -1
+                g = self._grade_bar(_b2, sig_dir)
+                signal, mode, grade = std_sig, EntryMode.STANDARD, g
+                b1, b2, b3 = _b1, _b2, _b3
+
+        if signal == Signal.NONE or b1 is None:
+            return
+
+        # --- SIGNAL CONFIRMED ---
         direction = "Buy" if signal == Signal.LONG else "Sell"
         sig_direction = 1 if signal == Signal.LONG else -1
 
-        # Grade signal by key level proximity
-        if _USE_KEY_LEVELS and self._today_levels is not None:
-            grade = grade_signal(
-                bar2_high=b2.high,
-                bar2_low=b2.low,
-                signal_direction=sig_direction,
-                levels=self._today_levels,
-                proximity_points=_LEVEL_PROXIMITY,
-            )
-        else:
-            grade = SignalGrade.C  # no levels → treat as minimum grade
-
         qty = MAX_POSITION_CONTRACTS_APLUS if grade == SignalGrade.A_PLUS else MAX_POSITION_CONTRACTS
-        logger.info("Signal grade: %s → %d contract(s)", grade.value, qty)
+        logger.info(
+            "Signal: %s  mode=%s  grade=%s  qty=%d",
+            signal.name, mode.value, grade.value, qty,
+        )
 
         entry_price = bar.close
         if signal == Signal.LONG:
-            stop_price = entry_price - STOP_POINTS
+            stop_price   = entry_price - STOP_POINTS
             target_price = entry_price + TARGET_POINTS
         else:
-            stop_price = entry_price + STOP_POINTS
+            stop_price   = entry_price + STOP_POINTS
             target_price = entry_price - TARGET_POINTS
 
         # Jev shadow log (never influences execution)
@@ -174,14 +240,12 @@ class Bot:
             bar2=b2,
             bar3=b3,
             entry_price=entry_price,
+            mode=mode.value,
         )
 
         logger.info(
-            "SIGNAL %s @ %.2f  stop=%.2f  tgt=%.2f",
-            signal.name,
-            entry_price,
-            stop_price,
-            target_price,
+            "SIGNAL %s @ %.2f  stop=%.2f  tgt=%.2f  mode=%s",
+            signal.name, entry_price, stop_price, target_price, mode.value,
         )
 
         send_signal_alert(
@@ -195,6 +259,10 @@ class Bot:
         asyncio.create_task(
             self._place_order(direction, entry_price, stop_price, target_price, qty)
         )
+
+    # ------------------------------------------------------------------
+    # Order management
+    # ------------------------------------------------------------------
 
     async def _place_order(
         self,
@@ -214,7 +282,6 @@ class Bot:
                 target_price=target_price,
             )
             self._current_order_id = ids["entry_id"]
-            # Only stop leg rests on exchange; TP is software-managed
             self._open_exit_ids = [i for i in [ids.get("stop_id")] if i]
             self._trade_direction = direction
             self._trade_target = target_price
@@ -225,29 +292,26 @@ class Bot:
 
     async def _close_position_at_tp(self) -> None:
         """Software take-profit: cancel the stop order and close position at market."""
-        target = self._trade_target
+        target    = self._trade_target
         direction = self._trade_direction
-        qty = self._trade_qty
-        stop_ids = list(self._open_exit_ids)
+        qty       = self._trade_qty
+        stop_ids  = list(self._open_exit_ids)
 
         # Clear state immediately to prevent re-entry
-        self._trade_target = None
+        self._trade_target    = None
         self._trade_direction = None
-        self._trade_qty = 0
-        self._open_exit_ids = []
+        self._trade_qty       = 0
+        self._open_exit_ids   = []
 
         try:
-            # Cancel the resting stop order first
             if stop_ids:
                 logger.info("TP: cancelling stop order(s) %s", stop_ids)
                 await self._client.cancel_orders(stop_ids)
 
-            # Place closing order (market-style limit fills immediately on Topstep)
             close_direction = "Sell" if direction == "Buy" else "Buy"
-            from src.broker.projectx_client import ORDER_TYPE_LIMIT, SIDE_BUY, SIDE_SELL, _BASE
-            from config.settings import SYMBOL as _SYM
-            exit_side = SIDE_SELL if close_direction == "Sell" else SIDE_BUY
-            contract_id = await self._client.get_contract_id(_SYM)
+            from src.broker.projectx_client import ORDER_TYPE_LIMIT, SIDE_BUY, SIDE_SELL
+            exit_side  = SIDE_SELL if close_direction == "Sell" else SIDE_BUY
+            contract_id = await self._client.get_contract_id(SYMBOL)
             body = {
                 "accountId": self._client._account_id,
                 "contractId": contract_id,
@@ -263,23 +327,26 @@ class Bot:
         except Exception as exc:
             logger.error("TP close failed: %s", exc)
 
+    # ------------------------------------------------------------------
+    # Level updates
+    # ------------------------------------------------------------------
+
     def _update_levels_for_bar(self, bar: Bar) -> None:
-        """Refresh today's DayLevels when the date changes."""
         day_str = bar.timestamp.strftime("%Y-%m-%d")
         if day_str == self._levels_date:
             return
         self._levels_date = day_str
-        # Build fresh levels — PDH/PDL/PDC require yesterday's bars which we
-        # don't have in the live feed, so start with what we can compute today.
-        # The opening range fills in after 9:45 ET from the first bars.
         import pandas as _pd
         self._today_levels = DayLevels(date=_pd.Timestamp(bar.timestamp).normalize())
         self._flattened_today = False
-        logger.info("New trading day %s — levels reset, waiting for opening range", day_str)
+        logger.info("New trading day %s — levels reset", day_str)
+
+    # ------------------------------------------------------------------
+    # Flatten
+    # ------------------------------------------------------------------
 
     async def _flatten_position(self) -> None:
         logger.info("Flatten time reached — closing any open position")
-        # Cancel open exit legs first to avoid runaway orders
         if self._open_exit_ids:
             await self._client.cancel_orders(self._open_exit_ids)
             self._open_exit_ids = []
@@ -307,11 +374,10 @@ class Bot:
             logger.info("Ctrl+C received — shutting down")
             self._shutdown.set()
 
-        signal.signal(signal.SIGINT, _sigint_handler)
+        signal.signal(signal.SIGINT,  _sigint_handler)
         signal.signal(signal.SIGTERM, _sigint_handler)
 
         async with self._client:
-            # Use specific account if set, otherwise take first active account
             target_id = os.getenv("PROJECTX_ACCOUNT_ID")
             if target_id:
                 self._client._account_id = int(target_id)
@@ -319,7 +385,6 @@ class Bot:
             acct = await self._client.get_account_info()
             logger.info("Account: %s  cash=%.2f", acct.get("name"), acct.get("cash", 0))
 
-            # Seed today's levels with prior day data fetched from yfinance
             pd_levels = fetch_prior_day(SYMBOL)
             import pandas as _pd2
             self._today_levels = DayLevels(
@@ -330,12 +395,13 @@ class Bot:
             )
             self._levels_date = datetime.now().strftime("%Y-%m-%d")
 
-            # Resolve contractId via REST API (needed for WS subscription)
             try:
                 contract_id = await self._client.get_contract_id(SYMBOL)
                 logger.info("Resolved contractId: %s", contract_id)
             except Exception as exc:
-                logger.warning("Could not resolve contractId (%s) — using symbol %s", exc, SYMBOL)
+                logger.warning(
+                    "Could not resolve contractId (%s) — using symbol %s", exc, SYMBOL
+                )
                 contract_id = SYMBOL
 
             feed = LiveFeed(

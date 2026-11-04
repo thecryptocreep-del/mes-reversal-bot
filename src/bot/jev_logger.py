@@ -41,8 +41,9 @@ class JevLogger:
         signal: Signal,
         bar1: Bar,
         bar2: Bar,
-        bar3: Bar,
+        bar3: Optional[Bar],
         entry_price: float,
+        mode: str = "standard",
         jev_signal: Optional[str] = None,
     ) -> None:
         """
@@ -50,18 +51,25 @@ class JevLogger:
 
         Args:
             timestamp: bar-close time (UTC recommended)
-            signal: the three-bar reversal signal
-            bar1, bar2, bar3: the three bars
+            signal: the reversal signal
+            bar1, bar2: always present (reference + extension/reversal bar)
+            bar3: present for standard 3-bar only; None for 2-bar patterns
             entry_price: intended entry price
+            mode: "standard" | "aggressive" | "anticipation"
             jev_signal: placeholder for future Jev output (None = not yet integrated)
         """
+
+        def _bar_dict(b: Bar) -> dict[str, float]:
+            return {"open": b.open, "high": b.high, "low": b.low, "close": b.close}
+
         record: dict[str, Any] = {
             "timestamp": timestamp.isoformat(),
             "signal": signal.name,
+            "mode": mode,
             "entry_price": entry_price,
-            "bar1": {"open": bar1.open, "high": bar1.high, "low": bar1.low, "close": bar1.close},
-            "bar2": {"open": bar2.open, "high": bar2.high, "low": bar2.low, "close": bar2.close},
-            "bar3": {"open": bar3.open, "high": bar3.high, "low": bar3.low, "close": bar3.close},
+            "bar1": _bar_dict(bar1),
+            "bar2": _bar_dict(bar2),
+            "bar3": _bar_dict(bar3) if bar3 is not None else None,
             "jev_signal": jev_signal,  # placeholder — never acted upon
         }
         try:
