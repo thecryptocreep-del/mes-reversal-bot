@@ -14,8 +14,10 @@ import os
 import re
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 
 PORT = int(os.getenv("DASH_PORT", "8765"))
+_ROOT = Path(__file__).resolve().parent
 
 
 # ─────────────────────────────────────────────────────────────
@@ -23,7 +25,7 @@ PORT = int(os.getenv("DASH_PORT", "8765"))
 # ─────────────────────────────────────────────────────────────
 
 def _latest_log() -> str | None:
-    files = sorted(glob.glob("logs/bot_*.log"))
+    files = sorted(glob.glob(str(_ROOT / "logs" / "bot_*.log")))
     return files[-1] if files else None
 
 
