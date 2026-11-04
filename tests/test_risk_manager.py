@@ -20,23 +20,50 @@ def _et(year: int, month: int, day: int, hour: int, minute: int) -> datetime:
 # ------------------------------------------------------------------
 
 def test_trade_limit_enforced():
-    rm = RiskManager()
-    now = _et(2024, 1, 10, 10, 0)
-    for _ in range(6):
-        assert rm.can_trade(now)
-        rm.record_trade(0.0, now)
-    # 7th trade must be blocked
-    assert not rm.can_trade(now)
+    """When MAX_TRADES_PER_DAY > 0, can_trade blocks once the limit is reached."""
+    from unittest.mock import patch
+    import config.risk as _r
+    with patch.object(_r, "MAX_TRADES_PER_DAY", 6):
+        import importlib, src.bot.risk_manager as _rm_mod
+        importlib.reload(_rm_mod)
+        RiskManagerPatched = _rm_mod.RiskManager
+        rm = RiskManagerPatched()
+        now = _et(2024, 1, 10, 10, 0)
+        for _ in range(6):
+            assert rm.can_trade(now)
+            rm.record_trade(0.0, now)
+        assert not rm.can_trade(now)
+    importlib.reload(_rm_mod)  # restore
 
 
 def test_trade_limit_exactly_at_max():
-    """Exactly MAX_TRADES_PER_DAY trades recorded → can_trade returns False."""
-    from config.risk import MAX_TRADES_PER_DAY
-    rm = RiskManager()
-    now = _et(2024, 1, 10, 10, 0)
-    for _ in range(MAX_TRADES_PER_DAY):
-        rm.record_trade(0.0, now)
-    assert not rm.can_trade(now)
+    """Exactly MAX_TRADES_PER_DAY trades recorded → can_trade returns False (when limit > 0)."""
+    from unittest.mock import patch
+    import config.risk as _r, importlib, src.bot.risk_manager as _rm_mod
+    with patch.object(_r, "MAX_TRADES_PER_DAY", 3):
+        importlib.reload(_rm_mod)
+        RiskManagerPatched = _rm_mod.RiskManager
+        rm = RiskManagerPatched()
+        now = _et(2024, 1, 10, 10, 0)
+        for _ in range(3):
+            rm.record_trade(0.0, now)
+        assert not rm.can_trade(now)
+    importlib.reload(_rm_mod)  # restore
+
+
+def test_trade_limit_zero_means_unlimited():
+    """MAX_TRADES_PER_DAY=0 means no limit — can_trade always returns True regardless of count."""
+    from unittest.mock import patch
+    import config.risk as _r, importlib, src.bot.risk_manager as _rm_mod
+    with patch.object(_r, "MAX_TRADES_PER_DAY", 0):
+        importlib.reload(_rm_mod)
+        RiskManagerPatched = _rm_mod.RiskManager
+        rm = RiskManagerPatched()
+        now = _et(2024, 1, 10, 10, 0)
+        for _ in range(50):
+            rm.record_trade(0.0, now)
+        assert rm.can_trade(now)
+    importlib.reload(_rm_mod)  # restore
 
 
 # ------------------------------------------------------------------
@@ -130,16 +157,22 @@ def test_session_window_at_end():
 # ------------------------------------------------------------------
 
 def test_resets_at_midnight():
-    rm = RiskManager()
-    day1 = _et(2024, 1, 10, 10, 0)
-    # Fill up trades on day 1
-    for _ in range(6):
-        rm.record_trade(0.0, day1)
-    assert not rm.can_trade(day1)
+    from unittest.mock import patch
+    import config.risk as _r, importlib, src.bot.risk_manager as _rm_mod
+    with patch.object(_r, "MAX_TRADES_PER_DAY", 6):
+        importlib.reload(_rm_mod)
+        RiskManagerPatched = _rm_mod.RiskManager
+        rm = RiskManagerPatched()
+        day1 = _et(2024, 1, 10, 10, 0)
+        # Fill up trades on day 1
+        for _ in range(6):
+            rm.record_trade(0.0, day1)
+        assert not rm.can_trade(day1)
 
-    # New day — counters should reset
-    day2 = _et(2024, 1, 11, 9, 30)
-    assert rm.can_trade(day2)
+        # New day — counters should reset
+        day2 = _et(2024, 1, 11, 9, 30)
+        assert rm.can_trade(day2)
+    importlib.reload(_rm_mod)  # restore
 
 
 def test_resets_daily_pnl_at_midnight():

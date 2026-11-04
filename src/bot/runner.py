@@ -26,6 +26,7 @@ from typing import Optional
 from config.risk import (
     MAX_POSITION_CONTRACTS,
     MAX_POSITION_CONTRACTS_APLUS,
+    MAX_TRADES_PER_DAY,
     STOP_POINTS,
     TARGET_POINTS,
     MIN_BAR2_EXTENSION_POINTS,
@@ -128,7 +129,7 @@ class Bot:
         bar_line = (
             f"[{ts_str}] O={bar.open:.2f} H={bar.high:.2f} "
             f"L={bar.low:.2f} C={bar.close:.2f} V={bar.volume:.0f} | "
-            f"trades={self._risk.trade_count}/{6} pnl=${self._risk.daily_pnl:.2f}"
+            f"trades={self._risk.trade_count}/{'∞' if MAX_TRADES_PER_DAY == 0 else MAX_TRADES_PER_DAY} pnl=${self._risk.daily_pnl:.2f}"
         )
         print(bar_line, flush=True)
         logger.info(bar_line)

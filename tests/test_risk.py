@@ -14,7 +14,8 @@ from config.risk import (
 def test_risk_limits_are_positive():
     assert MAX_POSITION_CONTRACTS > 0
     assert DAILY_LOSS_LIMIT_USD > 0
-    assert MAX_TRADES_PER_DAY > 0
+    # 0 is a valid sentinel meaning "no daily trade limit"
+    assert MAX_TRADES_PER_DAY >= 0
 
 
 def test_round_trip_cost_calculation():

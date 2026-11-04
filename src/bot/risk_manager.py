@@ -88,7 +88,7 @@ class RiskManager:
             now_et = _et_now()
         self._reset_if_new_day(now_et)
 
-        if self._trade_count >= MAX_TRADES_PER_DAY:
+        if MAX_TRADES_PER_DAY > 0 and self._trade_count >= MAX_TRADES_PER_DAY:
             logger.info(
                 "can_trade=False: trade count %d >= %d",
                 self._trade_count,
